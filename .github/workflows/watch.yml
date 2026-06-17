@@ -49,7 +49,8 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
           MAIL_FROM: ${{ secrets.MAIL_FROM }}
-          SLICE_SIZE: '100'   # 715 releases -> full cycle every ~8 runs (~2h at */15)
+          SLICE_SIZE: '200'   # priority sweep: top-200 by watch-score/run -> full coverage every ~4 runs (~1h),
+                              # hot/just-listed releases re-checked far sooner. ~4 min/run at 60 req/min.
           MODE: balanced
         run: node watch-once.js
 

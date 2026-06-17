@@ -23,7 +23,7 @@ const { processRelease, loadConfig } = require('./watcher');
 
 const STATE_DIR = path.join(__dirname, 'state');
 const cursorFile = () => path.join(STATE_DIR, 'cursor.json');
-const readCursor = () => { try { return JSON.parse(fs.readFileSync(cursorFile(), 'utf8')); } catch { return { idx: 0, wantlistAt: 0, wantlist: [] }; } };
+const readCursor = () => { try { return JSON.parse(fs.readFileSync(cursorFile(), 'utf8')); } catch { return { wantlistAt: 0, wantlist: [] }; } };
 const writeCursor = (c) => fs.writeFileSync(cursorFile(), JSON.stringify(c));
 
 async function main() {
@@ -41,34 +41,40 @@ async function main() {
   if (!cur.wantlist || !cur.wantlist.length || Date.now() - (cur.wantlistAt || 0) > config.wantlistRefreshMs) {
     cur.wantlist = await client.getWantlist(config.username);
     cur.wantlistAt = Date.now();
-    if (cur.idx >= cur.wantlist.length) cur.idx = 0;
     console.log(`Refreshed wantlist: ${cur.wantlist.length} releases.`);
   }
   const N = cur.wantlist.length;
   if (!N) { console.log('Empty wantlist — nothing to do.'); writeCursor(cur); publishDeals(store); return; }
 
-  const start = cur.idx % N;
+  const now = Date.now();
   const take = Math.min(sliceSize, N);
-  console.log(`Sweeping slice [${start}..${(start + take - 1) % N}] of ${N} (mode=${config.mode}, email=${mailer.enabled ? mailer.provider : 'off'}).`);
+  // Priority sweep: rank every release by how urgently it deserves a re-check (staleness +
+  // recent activity + rarity) and take the top `take`. This spends each run's API budget on the
+  // releases most likely to surface a JUST-LISTED bargain, while staleness still guarantees full
+  // coverage over time. (Replaces the old blind round-robin cursor.)
+  const ranked = cur.wantlist
+    .map((rel) => ({ rel, score: engine.releaseWatchScore(store.getHistory(rel.releaseId), now, { recentMs: config.minRecheckMs || 0 }) }))
+    .filter((x) => x.score >= 0)
+    .sort((a, b) => b.score - a.score);
+  const slice = (ranked.length ? ranked.map((x) => x.rel) : cur.wantlist).slice(0, take);
+  writeCursor(cur); // persist the wantlist cache (selection no longer needs a cursor index)
+  console.log(`Sweeping the ${slice.length} highest-priority of ${N} (mode=${config.mode}, email=${mailer.enabled ? mailer.provider : 'off'}).`);
 
   const deals = [];
   let checked = 0;
-  for (let i = 0; i < take; i++) {
-    const rel = cur.wantlist[(start + i) % N];
+  for (const rel of slice) {
     try {
       const d = await processRelease(rel, { client, store, engine, config });
       if (d) deals.push(d);
       checked++;
     } catch (e) { console.log(`  release ${rel.releaseId} error: ${e.message}`); }
   }
-  cur.idx = (start + take) % N;
-  writeCursor(cur);
 
   const sweepsToCover = Math.ceil(N / take);
   console.log(`Checked ${checked}. Deals this run: ${deals.length}. (Full wantlist covered every ~${sweepsToCover} runs.)`);
 
   if (deals.length) {
-    for (const d of deals) console.log(`  DEAL ${d.artist} – ${d.title}  ${d.currency} ${d.lowest} (${Math.round(d.discount * 100)}% off${d.suspicious ? ', ⚠maybe<VG+' : ''})`);
+    for (const d of deals) console.log(`  DEAL${d.freshListing ? ' 🆕just-listed' : ''} ${d.artist} – ${d.title}  ${d.currency} ${d.lowest} (${Math.round(d.discount * 100)}% off${d.suspicious ? ', ⚠maybe<VG+' : ''})`);
     if (mailer.enabled) {
       try { await mailer.sendDeals(deals); console.log(`Emailed ${deals.length} deal(s) to ${config.email.to}.`); }
       catch (e) { console.log('Email FAILED:', e.message); }

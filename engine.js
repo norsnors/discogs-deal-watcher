@@ -219,16 +219,65 @@ function evaluateMarketSignal(input, opts = {}) {
  *   warm-up:  no alerts until we've seen the release `warmupMin` times (learn its floor)
  *   sensitive: any copy >= minDiscount under the reference (standing cheap copies included)
  *   balanced:  + must also be ~ownDropFactor under the release's OWN usual lowest (a real dip)
+ *              OR be a brand-new listing (a copy that JUST appeared) at a new-low deal price —
+ *              "just listed and cheap" is exactly what we're hunting, so it bypasses the own-dip gate.
  *   strict:    balanced AND not "suspiciously low" (priced like a decent-grade copy)
+ *
+ *   opts.freshListing — true when num_for_sale rose since the last check (a copy was just listed).
  */
 function shouldFire(sig, historyCount, opts = {}) {
-  const { mode = 'balanced', ownDropFactor = 0.4, warmupMin = 4, warmupSensitive = 2 } = opts;
+  const { mode = 'balanced', ownDropFactor = 0.4, warmupMin = 4, warmupSensitive = 2, freshListing = false } = opts;
   const warm = historyCount >= (mode === 'sensitive' ? warmupSensitive : warmupMin);
   if (!warm) return false;
   if (mode === 'sensitive') return sig.isDeal;
   const ownDipOk = sig.ownDrop != null && sig.ownDrop >= ownDropFactor;
   if (mode === 'strict') return sig.isDeal && ownDipOk && !sig.suspicious;
-  return sig.isDeal && ownDipOk; // balanced
+  // balanced: a real dip under its own floor, OR a just-listed copy at a fresh new-low deal price.
+  return sig.isDeal && (ownDipOk || freshListing);
+}
+
+// ---------------------------------------------------------------------------
+// Freshness — catching copies that were JUST listed (API-only)
+// ---------------------------------------------------------------------------
+// The official API exposes no "date listed", so the only signal that a new copy
+// appeared is num_for_sale rising between two checks. Combined with a price drop
+// it means "a new (cheaper) copy was just listed" — the highest-value event.
+function isFreshListing(prevObs, curObs) {
+  if (!prevObs || !curObs) return false;
+  const pn = num(prevObs.numForSale);
+  const cn = num(curObs.numForSale);
+  return pn != null && cn != null && cn > pn;
+}
+
+/*
+ * releaseWatchScore(history, now, opts) — how urgently a release deserves re-checking.
+ * Higher = check sooner. Lets the rotating sweep spend its limited per-run API budget on
+ * the releases most likely to surface a just-listed bargain, instead of pure round-robin.
+ *
+ *   staleness  — minutes since last checked (never-checked sorts first); the coverage term
+ *   activity   — the last check showed a new listing or a price drop (it's "hot")
+ *   rarity     — few copies for sale: a cheap copy is rarer and more urgent to grab
+ */
+function releaseWatchScore(history, now, opts = {}) {
+  const { activityBoost = 30, dropBoost = 40, rarityCap = 12, rarityWeight = 1.5, recentMs = 0 } = opts;
+  const hist = history || [];
+  const last = hist[hist.length - 1];
+  const lastTs = last ? last.ts : 0;
+  if (recentMs && lastTs && now - lastTs < recentMs) return -1; // checked too recently — skip this round
+  const stalenessMin = (now - lastTs) / 60000; // never-checked (lastTs 0) => huge => first
+
+  let activity = 0;
+  if (hist.length >= 2) {
+    const prev = hist[hist.length - 2];
+    if (isFreshListing(prev, last)) activity += activityBoost;
+    const pl = num(prev.lowest), cl = num(last.lowest);
+    if (pl != null && cl != null && cl < pl) activity += dropBoost;
+  }
+
+  const n = last ? num(last.numForSale) : null;
+  const rarity = n != null && n > 0 && n <= rarityCap ? (rarityCap - n) * rarityWeight : 0;
+
+  return stalenessMin + activity + rarity;
 }
 
 // ---------------------------------------------------------------------------
@@ -252,6 +301,8 @@ module.exports = {
   evaluateDeal,
   evaluateMarketSignal,
   shouldFire,
+  isFreshListing,
+  releaseWatchScore,
   median,
   num,
   releaseMarketUrl,
@@ -369,6 +420,29 @@ if (require.main === module && process.argv.includes('--selftest')) {
   assert.ok(!shouldFire(dip, 4, { mode: 'strict' }), 'strict: rejects suspiciously-low (likely sub-VG+) copy');
   const cleanDip = evaluateMarketSignal({ lowest: 25, suggestion: 60, suggestionLow: 22, trailingMedian: 50, prevAlertedLowest: null }, { minDiscount: 0.5 });
   assert.ok(shouldFire(cleanDip, 4, { mode: 'strict' }), 'strict: accepts a dip priced above the VG suggestion');
+
+  // fresh-listing override: a just-listed cheap copy fires in balanced even without an own-dip.
+  // standingFresh: price == its usual lowest (no own-dip) but it's a new-low deal vs suggestion.
+  const standingFresh = evaluateMarketSignal({ lowest: 12, suggestion: 40, suggestionLow: 22, trailingMedian: 12, prevAlertedLowest: null }, { minDiscount: 0.5 });
+  assert.ok(!shouldFire(standingFresh, 10, { mode: 'balanced' }), 'balanced: cheap copy with no own-dip does NOT fire when not fresh');
+  assert.ok(shouldFire(standingFresh, 10, { mode: 'balanced', freshListing: true }), 'balanced: a JUST-LISTED cheap new-low copy fires (the target event)');
+  assert.ok(!shouldFire(standingFresh, 10, { mode: 'strict', freshListing: true }), 'strict ignores the fresh-listing shortcut');
+
+  // --- isFreshListing ---
+  assert.ok(isFreshListing({ numForSale: 3 }, { numForSale: 4 }), 'num_for_sale rose -> a copy was just listed');
+  assert.ok(!isFreshListing({ numForSale: 5 }, { numForSale: 5 }), 'unchanged count -> not fresh');
+  assert.ok(!isFreshListing({ numForSale: 5 }, { numForSale: 2 }), 'count fell (a copy sold) -> not fresh');
+  assert.ok(!isFreshListing(null, { numForSale: 2 }), 'no previous observation -> not fresh');
+
+  // --- releaseWatchScore ---
+  const t = 10_000_000;
+  const never = releaseWatchScore([], t);
+  const stale = releaseWatchScore([{ ts: t - 60 * 60000, lowest: 20, numForSale: 5 }], t); // 60 min ago
+  assert.ok(never > stale, 'a never-checked release outranks any checked one');
+  const hot = releaseWatchScore([{ ts: t - 70 * 60000, lowest: 20, numForSale: 8 }, { ts: t - 10 * 60000, lowest: 12, numForSale: 9 }], t);
+  const cold = releaseWatchScore([{ ts: t - 70 * 60000, lowest: 20, numForSale: 8 }, { ts: t - 10 * 60000, lowest: 20, numForSale: 8 }], t);
+  assert.ok(hot > cold, 'a release that just dropped + got a new listing outranks a quiet one checked at the same time');
+  assert.strictEqual(releaseWatchScore([{ ts: t - 60_000, lowest: 20, numForSale: 5 }], t, { recentMs: 5 * 60000 }), -1, 'checked < recentMs ago -> skipped this round');
 
   console.log('engine selftest: all assertions passed');
 }

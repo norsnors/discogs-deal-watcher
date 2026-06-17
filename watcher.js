@@ -75,7 +75,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function processRelease(rel, deps) {
   const { client, store, engine, config } = deps;
   const stats = await client.getMarketplaceStats(rel.releaseId, config.currency);
-  store.pushObservation(rel.releaseId, { ts: Date.now(), lowest: stats.lowestPrice, numForSale: stats.numForSale });
+  // Read the previous observation BEFORE pushing the new one so we can spot a just-listed copy
+  // (num_for_sale rising between checks) — the only "freshly listed" signal the API gives us.
+  const prevObs = store.lastObservation(rel.releaseId);
+  const curObs = { ts: Date.now(), lowest: stats.lowestPrice, numForSale: stats.numForSale };
+  store.pushObservation(rel.releaseId, curObs);
+  const freshListing = engine.isFreshListing(prevObs, curObs);
 
   // Cached, weekly-refreshed price suggestions (token required; ignore failures).
   let sug = store.getSuggestion(rel.releaseId);
@@ -100,8 +105,9 @@ async function processRelease(rel, deps) {
   }, { minDiscount: config.minDiscount });
 
   // Apply the sensitivity profile + warm-up (warm-up uses how many times we've seen this release).
+  // A just-listed copy at a new-low deal price fires in balanced mode even without an own-dip.
   const fire = engine.shouldFire(sig, store.historyCount(rel.releaseId), {
-    mode: config.mode, ownDropFactor: config.ownDropFactor, warmupMin: config.warmupMin,
+    mode: config.mode, ownDropFactor: config.ownDropFactor, warmupMin: config.warmupMin, freshListing,
   });
   if (!fire) return null;
 
@@ -121,6 +127,7 @@ async function processRelease(rel, deps) {
     ownDrop: sig.ownDrop,
     confidence: sig.confidence,
     suspicious: sig.suspicious,
+    freshListing,
     url: `${engine.releaseMarketUrl(rel.releaseId)}?sort=price%2Casc&limit=25&currency=${config.currency}`,
     releaseUrl: engine.releaseUrl(rel.releaseId),
     ts: Date.now(),
@@ -176,7 +183,7 @@ async function run() {
       state.lastError = null;
 
       if (deal) {
-        log(`DEAL  ${deal.artist} – ${deal.title}  ${deal.currency} ${deal.lowest}  (${Math.round(deal.discount * 100)}% off ${deal.referenceSource}${deal.suspicious ? ', suspicious' : ''})`);
+        log(`DEAL${deal.freshListing ? ' 🆕' : '  '} ${deal.artist} – ${deal.title}  ${deal.currency} ${deal.lowest}  (${Math.round(deal.discount * 100)}% off ${deal.referenceSource}${deal.suspicious ? ', suspicious' : ''})`);
         if (mailer.enabled) {
           try { await mailer.sendDeals([deal]); log('  emailed.'); }
           catch (e) { log('  email FAILED:', e.message); }

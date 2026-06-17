@@ -4,8 +4,10 @@ Watches your Discogs **wantlist** and alerts you (email + desktop dashboard) whe
 offered **far under its median price** (e.g. ≥ 50% below) **in VG+ or better** condition, with a
 direct link so you can buy it immediately.
 
-> Status: **early scaffold.** The acquisition layer (how marketplace data is fetched) is still
-> being decided — see "The Cloudflare wall" below.
+> Status: **live.** Runs every 15 min via GitHub Actions against a real 715-release wantlist and
+> emails new dips; the desktop dashboard reads the committed `deals.json` out of the box and has a
+> one-click **⚡ Scan now** button that sweeps the whole wantlist locally on demand. The acquisition
+> layer is API-only by necessity — see "The Cloudflare wall" below.
 
 ## The Cloudflare wall (the dominant constraint — read this first)
 
@@ -65,6 +67,22 @@ own-dip gate**:
   - `balanced` — fire only when a copy is **≥`minDiscount` under the VG+ suggestion** *and* **≥`ownDropFactor` (40%) under that release's own usual lowest** (a genuine new dip). Standing cheap copies stay silent.
   - `sensitive` — fire on any copy ≥`minDiscount` under the reference (standing copies included). Misses nothing, noisier.
   - `strict` — `balanced` **and** the price is above the VG suggestion (priced like a decent-grade copy → closest to the literal "VG+ or better"). Fewest, highest-quality alerts.
+
+### Catching *just-listed* copies faster
+
+The whole point is to grab a bargain before someone else does, so the watcher is biased toward
+**freshly-listed** copies:
+
+- **Fresh-listing signal.** The API has no "date listed", so the only tell that a new copy appeared
+  is `num_for_sale` *rising* between two checks (`engine.isFreshListing`). A copy that **just got
+  listed at a new-low deal price fires in `balanced` mode even without an own-dip** — exactly the
+  event we're hunting — and is tagged `🆕 just listed` in the email, the log, and the dashboard.
+- **Priority sweep.** Instead of a blind round-robin, each `watch-once.js` run ranks every release by
+  a **watch-score** (`engine.releaseWatchScore` = staleness + recent activity + rarity) and checks
+  the highest-priority `SLICE_SIZE` first. Releases that just dropped in price, just got a new
+  listing, or are rare (few copies) get re-checked far sooner, while staleness still guarantees full
+  coverage over time. At `SLICE_SIZE=200`, 715 releases are fully covered every ~4 runs (~1 h) and
+  hot ones every run.
 
 ## Modules
 
@@ -134,28 +152,53 @@ npm start                 # dev
 npm run build             # -> dist\DiscogsDeals-win32-x64\DiscogsDeals.exe (Windows .exe)
 ```
 
-In ⚙ **Settings** pick where it reads deals from — this matches your deployment:
+**Works on first launch — no setup.** It ships pointed at the public repo
+`norsnors/discogs-deal-watcher` in **GitHub** mode, so it reads the committed `deals.json` straight
+from the raw CDN (no token). Only open ⚙ **Settings** to change source:
 
+- **GitHub Actions** (default): the **repo** (`owner/name`); a **GitHub access token** is needed
+  *only* for a private repo (fine-grained PAT, *Contents: read-only*). Public repo → leave blank.
 - **Live server** (watcher.js on Fly / localhost): enter the **Server URL** + **Dashboard token**.
-- **GitHub Actions**: enter the **repo** (`owner/name`) + a **GitHub access token** (fine-grained PAT,
-  *Contents: read-only*). It reads the `deals.json` the workflow commits — no running server needed.
 
-It polls every 30s, filters (search / min-discount / hide "maybe <VG+"), and shows a desktop
-notification on a new deal. The HTTP to GitHub/your server happens in the Electron **main** process,
-so tokens never touch the page.
+It polls every 30s, filters (search / min-discount / **just-listed only** / hide "maybe <VG+"), tags
+`🆕 just listed` copies, and shows a desktop notification on a new deal. The HTTP to GitHub/your
+server happens in the Electron **main** process, so tokens never touch the page.
+
+### ⚡ Scan now (local full sweep, on demand)
+
+The green **Scan now** button is independent of the source setting: it runs a **full local sweep of
+your whole wantlist right then** — using the watcher's own engine + your local `config.json` token —
+and lists *every* copy currently ≥ your discount threshold under its VG+ suggestion (no warm-up, no
+dedupe; it's a "show me everything cheap now" scan). A progress bar shows count + ETA and it's
+cancellable. Results are GET-only — it never carts or buys. (First scan is slower because it caches
+each release's price suggestion; later scans are ~13 min for 715 at the 60-req/min limit.)
+
+### Logo + desktop shortcut
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\make-icon.ps1        # (re)generate assets/icon.png + icon.ico
+powershell -ExecutionPolicy Bypass -File tools\install-shortcut.ps1 # put a launcher on the Desktop
+```
+
+`tools/make-icon.ps1` draws the vinyl-record / price-drop logo with GDI+ (no ImageMagick) into
+`dashboard/assets/` — `logo.svg` is the in-app header art, `icon.png` the window icon, `icon.ico`
+the exe + shortcut icon. `tools/install-shortcut.ps1` drops a "Discogs Deal Watcher" shortcut on the
+Desktop pointing at the bundled `electron.exe`.
 
 ## Deploy — two options
 
 ### Option A — GitHub Actions (free, git-based; the periodic-scrape model)
 
 Push this folder to a GitHub repo. The included [`.github/workflows/watch.yml`](.github/workflows/watch.yml)
-runs `node watch-once.js` on a cron (default every 15 min): each run checks a **rotating slice** of
-the wantlist (`SLICE_SIZE`, default 50), carries state via the Actions cache, emails new dips via
-Resend, and commits `deals.json` for the dashboard. Add repo **Secrets**: `DISCOGS_TOKEN`,
-`DISCOGS_USERNAME`, `RESEND_API_KEY`, `MAIL_TO` (`riminiexpressdj@gmail.com`), `MAIL_FROM` (optional).
+runs `node watch-once.js` on a cron (default every 15 min): each run checks the **highest-priority
+slice** of the wantlist (`SLICE_SIZE`, default 200 — ranked by watch-score, see "Catching just-listed
+copies faster"), carries state via the Actions cache, emails new dips via Resend, and commits
+`deals.json` for the dashboard. Add repo **Secrets**: `DISCOGS_TOKEN`, `DISCOGS_USERNAME`,
+`RESEND_API_KEY`, `MAIL_TO` (`riminiexpressdj@gmail.com`), `MAIL_FROM` (optional).
 
-- **Coverage:** full wantlist every ⌈N/SLICE_SIZE⌉ runs. 715 / 50 ≈ 15 runs ≈ ~3.7 h at 15-min
-  cadence. Raise `SLICE_SIZE` or the cron frequency for faster coverage.
+- **Coverage:** full wantlist every ⌈N/SLICE_SIZE⌉ runs. 715 / 200 ≈ 4 runs ≈ ~1 h at 15-min
+  cadence, with hot/just-listed releases re-checked every run. Raise `SLICE_SIZE` or the cron
+  frequency for faster coverage (public repo = unlimited minutes).
 - **Cost:** private repos get 2000 Actions-min/mo free; runs are short (Resend needs no `npm install`),
   so 15-min cadence fits. **Public repos = unlimited.** Note: GitHub pauses cron on a repo with no
   activity for 60 days.
@@ -188,7 +231,7 @@ Dashboard → source **Live server**, URL `https://<app>.fly.dev`, the `DASHBOAR
 | `MAIL_TO` / `MAIL_FROM` | where alerts go / sender (default `onboarding@resend.dev`) |
 | `EMAIL_PROVIDER` | `resend` (default if key present) or `gmail` |
 | `MODE` | `balanced` (default) / `sensitive` / `strict` |
-| `SLICE_SIZE` | releases checked per `watch-once.js` run (GitHub model, default 50) |
+| `SLICE_SIZE` | releases checked per `watch-once.js` run, by watch-score priority (GitHub model, default 200) |
 | `DASHBOARD_TOKEN` | bearer token the dashboard must send (live-server model) |
 | `PORT` | dashboard API port (default 8787) |
 | `MIN_DISCOUNT` | deal threshold, 0–1 (default 0.5) |

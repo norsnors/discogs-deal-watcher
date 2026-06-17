@@ -44,6 +44,8 @@ function makeStore(dir) {
       write('history.json', history);
     },
     historyCount(releaseId) { return (history[releaseId] || []).length; },
+    getHistory(releaseId) { return history[releaseId] || []; },
+    lastObservation(releaseId) { const a = history[releaseId]; return a && a.length ? a[a.length - 1] : null; },
     trailingMedianLowest(releaseId, n = 30) {
       const arr = (history[releaseId] || []).slice(-n).map((o) => o.lowest).filter((x) => typeof x === 'number' && x > 0);
       if (!arr.length) return null;
@@ -85,6 +87,9 @@ if (require.main === module && process.argv.includes('--selftest')) {
   s.pushObservation(100, { ts: 3, lowest: 32, numForSale: 6 });
   assert.strictEqual(s.trailingMedianLowest(100), 30, 'median of [30,28,32] = 30');
   assert.strictEqual(s.historyCount(100), 3, 'three observations recorded');
+  assert.strictEqual(s.lastObservation(100).lowest, 32, 'lastObservation returns the newest obs');
+  assert.strictEqual(s.getHistory(100).length, 3, 'getHistory returns the full series');
+  assert.strictEqual(s.lastObservation(999), null, 'lastObservation is null for an unseen release');
 
   s.setAlerted(100, { lowest: 12, ts: 99 });
   s.setSuggestion(100, { ts: 5, vgplus: 30, vg: 18 });

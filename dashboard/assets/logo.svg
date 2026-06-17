@@ -1,0 +1,40 @@
+<svg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Discogs Deal Watcher">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d2633"/>
+      <stop offset="1" stop-color="#0b0e13"/>
+    </linearGradient>
+    <radialGradient id="vinyl" cx="0.38" cy="0.32" r="0.85">
+      <stop offset="0" stop-color="#222b38"/>
+      <stop offset="0.55" stop-color="#10151c"/>
+      <stop offset="1" stop-color="#080b10"/>
+    </radialGradient>
+    <linearGradient id="label" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#34e07e"/>
+      <stop offset="1" stop-color="#1aa258"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.16"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- tile -->
+  <rect x="0" y="0" width="256" height="256" rx="56" fill="url(#bg)"/>
+
+  <!-- vinyl record -->
+  <circle cx="128" cy="128" r="90" fill="url(#vinyl)"/>
+  <g fill="none" stroke="#2b3543" stroke-width="2" opacity="0.8">
+    <circle cx="128" cy="128" r="80"/>
+    <circle cx="128" cy="128" r="70"/>
+    <circle cx="128" cy="128" r="60"/>
+    <circle cx="128" cy="128" r="50"/>
+  </g>
+  <!-- top-left sheen sweep -->
+  <path d="M128 38 A90 90 0 0 0 38 128 A90 90 0 0 1 128 38 Z" fill="url(#sheen)"/>
+
+  <!-- green center label = price-drop arrow -->
+  <circle cx="128" cy="128" r="38" fill="url(#label)"/>
+  <path d="M120 104 h16 v22 h15 l-23 26 l-23 -26 h15 z" fill="#06210f" opacity="0.92"/>
+  <path d="M119 103 h16 v22 h15 l-23 26 l-23 -26 h15 z" fill="#ffffff"/>
+</svg>

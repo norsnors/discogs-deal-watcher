@@ -35,8 +35,8 @@ body {
   border-bottom: 1px solid var(--line);
 }
 .brand { display: flex; align-items: center; gap: 10px; }
-.brand h1 { font-size: 15px; font-weight: 700; margin: 0; letter-spacing: .2px; }
-.brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px var(--green); }
+.brand h1 { font-size: 15px; font-weight: 700; margin: 0; letter-spacing: .2px; white-space: nowrap; }
+.brand .logo { width: 30px; height: 30px; display: block; border-radius: 7px; }
 .status { display: flex; gap: 8px; flex: 1; flex-wrap: wrap; }
 .pill {
   font-size: 12px; color: var(--muted);
@@ -45,11 +45,30 @@ body {
 }
 .pill.ok { color: var(--green); border-color: #1f5135; }
 .pill.bad { color: var(--red); border-color: #5b2b2b; }
+.actions { display: flex; align-items: center; gap: 8px; }
 .actions button {
   background: #11161d; color: var(--text); border: 1px solid var(--line);
   width: 34px; height: 34px; border-radius: 9px; font-size: 16px; cursor: pointer;
 }
 .actions button:hover { background: #1c2531; }
+/* Primary action: Scan now */
+.actions button.scan {
+  width: auto; padding: 0 14px; font-size: 13px; font-weight: 700; white-space: nowrap;
+  background: linear-gradient(180deg, #2ee07a, #1fae5e); color: #06210f; border: none;
+  box-shadow: 0 1px 0 #ffffff22 inset, 0 2px 8px #1fae5e44;
+}
+.actions button.scan:hover { background: linear-gradient(180deg, #3aee86, #25b766); }
+.actions button.scan:disabled { background: #1c2733; color: var(--muted); box-shadow: none; cursor: default; }
+
+/* Scan progress strip */
+.scanbar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 18px; background: #12161d; border-bottom: 1px solid var(--line);
+}
+.scanbar-track { flex: 1; height: 8px; background: #0c1014; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+.scanbar-fill { height: 100%; width: 0; background: linear-gradient(90deg, #1fae5e, #2ee07a); border-radius: 999px; transition: width .25s ease; }
+.scanbar-text { font-size: 12px; color: var(--muted); white-space: nowrap; min-width: 220px; }
+.ghost.small { padding: 5px 10px; font-size: 12px; }
 
 /* Filters */
 .filters {
@@ -99,6 +118,8 @@ input[type="range"] { accent-color: var(--accent); }
 .tag.warn { color: var(--amber); border-color: #5a4a17; }
 .tag.conf-2 { color: var(--green); border-color: #1f5135; }
 .tag.conf-0 { color: var(--red); border-color: #5b2b2b; }
+.tag.fresh { color: #06210f; background: var(--green); border-color: var(--green); font-weight: 700; }
+.card.is-fresh { border-color: #2c6b46; box-shadow: 0 0 0 1px #2ecc7133, 0 6px 18px -8px #1fae5e55; }
 .card .buy {
   display: inline-block; margin-top: 12px; text-decoration: none; cursor: pointer;
   background: var(--green-deep); color: #fff; padding: 8px 14px; border-radius: 8px;
@@ -116,6 +137,7 @@ input[type="range"] { accent-color: var(--accent); }
 .modal-card h2 { margin: 0 0 4px; font-size: 17px; }
 .modal-card .hint { color: var(--muted); font-size: 12px; margin: 0 0 16px; }
 .modal-card label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+.modal-card .opt { color: #5f6b7a; font-weight: 400; }
 .modal-card input[type="text"], .modal-card input[type="password"], .modal-card select {
   display: block; width: 100%; margin-top: 6px; background: #0c1014; border: 1px solid var(--line);
   color: var(--text); padding: 9px 11px; border-radius: 8px; font-size: 13px;
