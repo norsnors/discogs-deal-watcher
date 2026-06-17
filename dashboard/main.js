@@ -40,16 +40,26 @@ async function serverGet(s, pathname) {
   } finally { to.done(); }
 }
 
-// GitHub mode (watch-once.js via Actions): read the committed deals.json via the GitHub API.
+// GitHub mode (watch-once.js via Actions): read the committed deals.json.
+//  - public repo (no token): raw CDN — no auth, no 60-req/hour API limit.
+//  - private repo (token):   authenticated Contents API.
 async function githubDeals(s) {
   const repo = (s.githubRepo || '').trim().replace(/^https?:\/\/github\.com\//, '').replace(/\/+$/, '');
   if (!repo) throw new Error('No GitHub repo (owner/name) set — open Settings.');
+  const branch = (s.githubBranch || 'main').trim();
   const to = withTimeout(12_000);
   try {
-    const res = await fetch(`https://api.github.com/repos/${repo}/contents/deals.json`, {
-      headers: { Accept: 'application/vnd.github.raw', ...(s.githubToken ? { authorization: 'Bearer ' + s.githubToken } : {}) },
-      signal: to.signal,
-    });
+    let res;
+    if (s.githubToken) {
+      res = await fetch(`https://api.github.com/repos/${repo}/contents/deals.json?ref=${branch}`, {
+        headers: { Accept: 'application/vnd.github.raw', authorization: 'Bearer ' + s.githubToken },
+        signal: to.signal,
+      });
+    } else {
+      res = await fetch(`https://raw.githubusercontent.com/${repo}/${branch}/deals.json?t=${Date.now()}`, {
+        cache: 'no-store', signal: to.signal,
+      });
+    }
     if (res.status === 404) return []; // not committed yet (no deals so far)
     if (res.status === 401 || res.status === 403) throw new Error('GitHub auth failed — check the access token in Settings.');
     if (!res.ok) throw new Error('GitHub HTTP ' + res.status);
