@@ -126,11 +126,47 @@ function loadWatcher() {
   }
 }
 
+const SOLD_TTL_MS = 7 * 24 * 60 * 60 * 1000; // sold-median changes slowly; cache a week
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const DISCOGS_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+const parseMoney = (s) => { if (s == null) return null; const n = parseFloat(String(s).replace(/[^\d.]/g, '')); return Number.isFinite(n) ? n : null; };
+
+// In-page extractor: pull the "Last Sold / Low / Median / High" sales-history block off the
+// release page. Discogs renders it in plain text once Cloudflare clears (verified live).
+const SOLD_EXTRACT = `(() => {
+  const t = document.body ? document.body.innerText : '';
+  const g = (re) => { const m = t.match(re); return m ? m[1] : null; };
+  return {
+    median: g(/Median:\\s*[^\\d-]{0,4}([\\d.,]+)/i),
+    low: g(/Low:\\s*[^\\d-]{0,4}([\\d.,]+)/i),
+    high: g(/High:\\s*[^\\d-]{0,4}([\\d.,]+)/i),
+    lastSold: g(/Last Sold:\\s*([^\\n\\t]+)/i),
+    challenged: /just a moment|checking your browser|enable javascript/i.test((document.title || '') + ' ' + t.slice(0, 300)),
+    len: t.length,
+  };
+})()`;
+
+// Load a release page in a hidden (real Chromium, residential IP) window and read its REAL
+// sales-history median. The Cloudflare JS challenge runs and clears in this window; the
+// cf_clearance cookie persists across navigations so only the first load pays the wait.
+async function fetchSoldMedian(cfWin, releaseId) {
+  await cfWin.loadURL(`https://www.discogs.com/release/${releaseId}`, { userAgent: DISCOGS_UA }).catch(() => {});
+  let r = null;
+  for (let i = 0; i < 22; i++) {
+    await sleep(1000);
+    r = await cfWin.webContents.executeJavaScript(SOLD_EXTRACT).catch(() => null);
+    if (r && !r.challenged && r.len > 1500) break;
+  }
+  if (!r || r.challenged) return null; // Cloudflare never cleared for this one
+  return { median: parseMoney(r.median), low: parseMoney(r.low), high: parseMoney(r.high), lastSold: r.lastSold || null, ts: Date.now() };
+}
+
 async function runScrape(win) {
   if (scrapeRunning) throw new Error('A scan is already running.');
   scrapeRunning = true;
   scrapeAbort = false;
   const send = (m) => { try { win.webContents.send('scrape:progress', m); } catch { /* window gone */ } };
+  let cfWin = null;
   try {
     const { engine, makeClient, makeStore, loadConfig } = loadWatcher();
     const config = loadConfig();
@@ -143,9 +179,11 @@ async function runScrape(win) {
     send({ phase: 'wantlist', checked: 0, total: 0, found: 0 });
     const wantlist = await client.getWantlist(config.username);
     const total = wantlist.length;
-    const deals = [];
-    let checked = 0;
 
+    // PHASE 1 (API, fast): find candidates that look cheap vs the VG+ suggestion. This bounds the
+    // slow web phase to a shortlist instead of scraping all ~715 release pages.
+    const candidates = [];
+    let checked = 0;
     for (const rel of wantlist) {
       if (scrapeAbort) break;
       try {
@@ -155,7 +193,6 @@ async function runScrape(win) {
         store.pushObservation(rel.releaseId, curObs);
 
         if (stats.numForSale > 0 && stats.lowestPrice != null) {
-          // Reference: cached/fresh VG+ suggestion (full ladder), else this release's own trailing median.
           let sug = store.getSuggestion(rel.releaseId);
           if (!sug || !sug.ladder || Date.now() - sug.ts > SUGGESTION_TTL_MS) {
             try {
@@ -163,43 +200,63 @@ async function runScrape(win) {
               if (raw) { sug = { ts: Date.now(), vgplus: raw['Very Good Plus (VG+)']?.value ?? null, vg: raw['Very Good (VG)']?.value ?? null, ladder: engine.extractLadder(raw) }; store.setSuggestion(rel.releaseId, sug); }
             } catch { /* no suggestion -> trailing-median fallback */ }
           }
-          // Collect PERMISSIVELY (item discount >= 40%, no value/shipping floor) and let the
-          // dashboard sliders narrow it live — so the user can dial in suggested-price, % off,
-          // budget and shipping without re-scanning, and never miss the €2-for-€100 diamond.
-          const sig = engine.evaluateMarketSignal({
+          const prelim = engine.evaluateMarketSignal({
             lowest: stats.lowestPrice,
-            suggestion: sug ? sug.vgplus : null,
-            suggestionLow: sug ? sug.vg : null,
-            ladder: sug ? sug.ladder : null,
+            suggestion: sug ? sug.vgplus : null, suggestionLow: sug ? sug.vg : null, ladder: sug ? sug.ladder : null,
             trailingMedian: store.trailingMedianLowest(rel.releaseId, config.trailingN),
-            prevAlertedLowest: null, // manual scan: show every current bargain, no dedupe
+            prevAlertedLowest: null,
           }, { minDiscount: 0.4 });
-
-          if (sig.meetsThreshold) {
-            deals.push({
-              id: `${rel.releaseId}-scan`,
-              releaseId: rel.releaseId, title: rel.title, artist: rel.artist, year: rel.year, thumb: rel.thumb,
-              lowest: stats.lowestPrice, currency: stats.currency || config.currency, numForSale: stats.numForSale,
-              reference: sig.reference, referenceSource: sig.referenceSource, discount: sig.discount,
-              impliedGrade: sig.impliedGrade, pricedAsWorn: sig.pricedAsWorn,
-              ownDrop: sig.ownDrop, confidence: sig.confidence, suspicious: sig.suspicious,
-              freshListing: engine.isFreshListing(prevObs, curObs),
-              url: `${engine.releaseMarketUrl(rel.releaseId)}?sort=price%2Casc&limit=25&currency=${config.currency}`,
-              releaseUrl: engine.releaseUrl(rel.releaseId), ts: Date.now(),
-            });
-          }
+          if (prelim.meetsThreshold) candidates.push({ rel, stats, sug, freshListing: engine.isFreshListing(prevObs, curObs) });
         }
       } catch (e) { /* one release failing must not abort the scan */ }
       checked++;
-      if (checked % 2 === 0 || checked === total) send({ phase: 'scan', checked, total, found: deals.length });
+      if (checked % 2 === 0 || checked === total) send({ phase: 'scan', checked, total, found: candidates.length });
+    }
+
+    // PHASE 2 (web, slower): for each candidate fetch the REAL sales-history median via a hidden
+    // BrowserWindow (residential IP clears Cloudflare), then re-judge against that true market value.
+    cfWin = new BrowserWindow({ show: false, width: 1200, height: 900, webPreferences: { images: false } });
+    const deals = [];
+    let priced = 0;
+    for (const c of candidates) {
+      if (scrapeAbort) break;
+      let sold = store.getSoldMedian(c.rel.releaseId);
+      if (!sold || Date.now() - sold.ts > SOLD_TTL_MS) {
+        try { const f = await fetchSoldMedian(cfWin, c.rel.releaseId); if (f) { sold = f; store.setSoldMedian(c.rel.releaseId, f); } } catch { /* leave sold null -> falls back to suggestion */ }
+        await sleep(800); // be gentle on Discogs/Cloudflare between page loads
+      }
+      const sig = engine.evaluateMarketSignal({
+        lowest: c.stats.lowestPrice,
+        soldMedian: sold ? sold.median : null,
+        suggestion: c.sug ? c.sug.vgplus : null, suggestionLow: c.sug ? c.sug.vg : null, ladder: c.sug ? c.sug.ladder : null,
+        trailingMedian: store.trailingMedianLowest(c.rel.releaseId, config.trailingN),
+        prevAlertedLowest: null,
+      }, { minDiscount: 0.4 });
+      if (sig.meetsThreshold) {
+        deals.push({
+          id: `${c.rel.releaseId}-scan`,
+          releaseId: c.rel.releaseId, title: c.rel.title, artist: c.rel.artist, year: c.rel.year, thumb: c.rel.thumb,
+          lowest: c.stats.lowestPrice, currency: c.stats.currency || config.currency, numForSale: c.stats.numForSale,
+          reference: sig.reference, referenceSource: sig.referenceSource, discount: sig.discount,
+          soldMedian: sold ? sold.median : null, soldLow: sold ? sold.low : null, soldHigh: sold ? sold.high : null, lastSold: sold ? sold.lastSold : null,
+          impliedGrade: sig.impliedGrade, pricedAsWorn: sig.pricedAsWorn,
+          ownDrop: sig.ownDrop, confidence: sig.confidence, suspicious: sig.suspicious,
+          freshListing: c.freshListing,
+          url: `${engine.releaseMarketUrl(c.rel.releaseId)}?sort=price%2Casc&limit=25&currency=${config.currency}`,
+          releaseUrl: engine.releaseUrl(c.rel.releaseId), ts: Date.now(),
+        });
+      }
+      priced++;
+      send({ phase: 'prices', checked: priced, total: candidates.length, found: deals.length });
     }
 
     deals.sort((a, b) => (b.discount ?? 0) - (a.discount ?? 0));
     try { fs.writeFileSync(LAST_SCAN_FILE(), JSON.stringify({ ts: Date.now(), deals })); } catch { /* best effort */ }
-    send({ phase: 'done', checked, total, found: deals.length, aborted: scrapeAbort });
-    return { deals, checked, total, aborted: scrapeAbort };
+    send({ phase: 'done', checked: total, total, found: deals.length, aborted: scrapeAbort });
+    return { deals, checked: total, total, aborted: scrapeAbort };
   } finally {
     scrapeRunning = false;
+    if (cfWin) { try { cfWin.destroy(); } catch { /* already gone */ } }
   }
 }
 

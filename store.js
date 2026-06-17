@@ -33,6 +33,7 @@ function makeStore(dir) {
   const history = read('history.json', {});
   const alerted = read('alerted.json', {});
   const suggestions = read('suggestions.json', {});
+  const soldMedians = read('soldmedians.json', {}); // real sales-history medians (scraped locally)
   let deals = read('deals.json', []);
 
   return {
@@ -61,6 +62,10 @@ function makeStore(dir) {
     // --- cached price suggestions ---
     getSuggestion(releaseId) { return suggestions[releaseId] || null; },
     setSuggestion(releaseId, v) { suggestions[releaseId] = v; write('suggestions.json', suggestions); },
+
+    // --- cached real sales-history medians (from the local residential scrape) ---
+    getSoldMedian(releaseId) { return soldMedians[releaseId] || null; },
+    setSoldMedian(releaseId, v) { soldMedians[releaseId] = v; write('soldmedians.json', soldMedians); },
 
     // --- deals (dashboard feed) ---
     addDeal(deal) {

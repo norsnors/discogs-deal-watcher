@@ -183,12 +183,14 @@ function pricedAsWorn(lowest, ladder) {
  * evaluateMarketSignal(input, opts) where
  *   input: {
  *     lowest            number   current cheapest price (any condition)
- *     suggestion        number?  suggested price for VG+ (preferred reference)
+ *     soldMedian        number?  REAL sales-history median (web-only; the best reference when present)
+ *     suggestion        number?  suggested price for VG+ (Discogs's algorithmic guess; fallback)
  *     suggestionLow     number?  suggested price for VG (used for "suspiciously low")
  *     ladder            object?  full { gradeLabel: value } suggestion ladder (for impliedGrade)
  *     trailingMedian    number?  median of this release's own recent lowest-prices
  *     prevAlertedLowest number?  lowest we last alerted on (for new-low dedupe)
  *   }
+ *   Reference preference: soldMedian (real market value) > VG+ suggestion > our trailing median.
  *   opts: { minDiscount=0.5, newLowFactor=0.9, minReference=0, shippingEstimate=0 }
  *     minReference     — skip cheap records: require the reference price >= this (€). Safe for
  *                        diamonds (a €100 record always clears it); only kills low-value noise.
@@ -197,10 +199,11 @@ function pricedAsWorn(lowest, ladder) {
  *           minReferenceOk, confidence, isNewLow, suspicious, impliedGrade, pricedAsWorn, reasons[] }
  */
 function evaluateMarketSignal(input, opts = {}) {
-  const { lowest, suggestion, suggestionLow, ladder, trailingMedian, prevAlertedLowest } = input;
+  const { lowest, soldMedian, suggestion, suggestionLow, ladder, trailingMedian, prevAlertedLowest } = input;
   const { minDiscount = 0.5, newLowFactor = 0.9, minReference = 0, shippingEstimate = 0 } = opts;
   const reasons = [];
   const low = num(lowest);
+  const sm = num(soldMedian);
   const sug = num(suggestion);
   const tm = num(trailingMedian);
   const ship = num(shippingEstimate) || 0;
@@ -210,11 +213,13 @@ function evaluateMarketSignal(input, opts = {}) {
   // new, cheaper-than-usual copy has a big ownDrop.
   const ownDrop = (tm != null && tm > 0 && low != null && low > 0) ? 1 - low / tm : null;
 
-  // Prefer the condition-matched suggested price; fall back to the release's own
-  // trailing median-of-lows (what it has normally been selling at).
+  // Reference preference: the REAL sales-history median (what copies actually sell for) is the
+  // truest market value; then Discogs's VG+ suggestion (an algorithmic guess, often off); then our
+  // own trailing median-of-lows (asking prices we've observed).
   let reference = null;
   let referenceSource = null;
-  if (sug != null && sug > 0) { reference = sug; referenceSource = 'suggestion'; }
+  if (sm != null && sm > 0) { reference = sm; referenceSource = 'sold-median'; }
+  else if (sug != null && sug > 0) { reference = sug; referenceSource = 'suggestion'; }
   else if (tm != null && tm > 0) { reference = tm; referenceSource = 'trailing-median'; }
 
   const grade = impliedGrade(low, ladder);
@@ -448,6 +453,13 @@ if (require.main === module && process.argv.includes('--selftest')) {
   // ownDrop: current 5 vs own usual lowest 20 -> 75% under its own floor.
   s = evaluateMarketSignal({ lowest: 5, suggestion: 40, suggestionLow: 22, trailingMedian: 20, prevAlertedLowest: null }, { minDiscount: 0.5 });
   assert.ok(Math.abs(s.ownDrop - 0.75) < 1e-9, 'ownDrop computed vs trailing median');
+
+  // --- sold-median is the preferred reference ---
+  s = evaluateMarketSignal({ lowest: 10, soldMedian: 40, suggestion: 25, trailingMedian: 22, prevAlertedLowest: null }, { minDiscount: 0.5 });
+  assert.strictEqual(s.referenceSource, 'sold-median', 'real sold-median wins over suggestion + trailing');
+  assert.ok(Math.abs(s.discount - (1 - 10 / 40)) < 1e-9, 'discount computed against the sold-median');
+  s = evaluateMarketSignal({ lowest: 10, suggestion: 25, trailingMedian: 22, prevAlertedLowest: null }, { minDiscount: 0.5 });
+  assert.strictEqual(s.referenceSource, 'suggestion', 'no sold-median -> fall back to suggestion');
 
   // --- minReference (value floor) ---
   // 60% off a €30 record is a deal; the SAME 60% off a €10 record is filtered by a €25 floor.

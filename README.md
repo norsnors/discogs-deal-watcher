@@ -90,6 +90,13 @@ A flat "≥50% off" rule on a 715-release wantlist surfaced ~250 hits — mostly
 "deal" isn't worth the trouble. The fix is **detect permissively, filter powerfully**, never a hard
 exclusion that could kill the once-in-a-lifetime steal:
 
+- **Reference = the REAL sales-history median (the `⚡ Scan now` path).** Discogs's `price_suggestions`
+  is an algorithmic guess and is often wrong, which matters because the reference sets the discount.
+  The local scan instead reads the actual **Last Sold / Low / Median / High** off each release page —
+  what copies *truly* trade for — via a hidden Electron `BrowserWindow` (your residential IP clears
+  Cloudflare; cached a week in `state/soldmedians.json`). Discount is then computed against real
+  market value, so the **outliers** stand out. Cloud (Actions) can't reach the web, so it falls back
+  to the VG+ suggestion. Reference preference: `sold-median` → VG+ `suggestion` → our trailing median.
 - **Value floor (`minReference`, default €25).** Skip records whose VG+ suggested price is under €25.
   This is *safe for diamonds* — a €100 record always clears it — it only removes low-value noise.
 - **Shipping counts (`shippingEstimate`, default €5).** The API can't see a listing's real shipping
@@ -191,11 +198,12 @@ new deal (see "Finding the real diamonds"). The HTTP to GitHub/your server happe
 ### ⚡ Scan now (local full sweep, on demand)
 
 The green **Scan now** button is independent of the source setting: it runs a **full local sweep of
-your whole wantlist right then** — using the watcher's own engine + your local `config.json` token —
-and lists *every* copy currently ≥ your discount threshold under its VG+ suggestion (no warm-up, no
-dedupe; it's a "show me everything cheap now" scan). A progress bar shows count + ETA and it's
-cancellable. Results are GET-only — it never carts or buys. (First scan is slower because it caches
-each release's price suggestion; later scans are ~13 min for 715 at the 60-req/min limit.)
+your whole wantlist right then** — using the watcher's own engine + your local `config.json` token.
+Two phases: (1) a fast API pass over all releases to shortlist the cheap-looking ones, then (2) for
+each of those it fetches the **real sales-history median** off the release page (hidden Electron
+`BrowserWindow`, residential IP clears Cloudflare) and re-judges the discount against that true market
+value. A progress bar shows count + ETA and it's cancellable. Results are GET-only — it never carts or
+buys. (First scan is slowest — it caches each release's price suggestion + sold-median for a week.)
 
 ### Logo + desktop shortcut
 

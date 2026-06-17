@@ -34,7 +34,7 @@ const sym = (c) => ({ EUR: '€', USD: '$', GBP: '£' }[c] || '');
 const money = (v, c) => (v == null ? '—' : sym(c) + Number(v).toFixed(2));
 const pct = (d) => (d == null ? '—' : Math.round(d * 100) + '%');
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]));
-const REF_LABEL = { suggestion: 'VG+ suggested', 'trailing-median': 'usual lowest' };
+const REF_LABEL = { 'sold-median': 'real sold median', suggestion: 'VG+ suggested', 'trailing-median': 'usual lowest' };
 
 // "Very Good Plus (VG+)" -> "VG+"
 const gradeShort = (g) => { if (!g) return null; const m = String(g).match(/\(([^)]+)\)/); return m ? m[1] : g; };
@@ -96,7 +96,7 @@ function card(d) {
         <span class="discount">${pct(d._eff)} off</span>
       </div>
       <div class="subprice">${shipNote}</div>
-      <div class="ref">vs ${money(d.reference, d.currency)} ${REF_LABEL[d.referenceSource] || 'ref'}${save} · ${esc(String(d.numForSale ?? '?'))} for sale</div>
+      <div class="ref">vs ${money(d.reference, d.currency)} ${REF_LABEL[d.referenceSource] || 'ref'}${d.soldLow != null && d.soldHigh != null ? ` (${money(d.soldLow, d.currency)}–${money(d.soldHigh, d.currency)})` : ''}${save} · ${esc(String(d.numForSale ?? '?'))} for sale</div>
       <div class="meta">${fresh}${gradeChip(d)}${conf}</div>
       <button class="buy" data-url="${esc(d.url)}">View &amp; buy on Discogs →</button>
     </div>
@@ -246,6 +246,12 @@ async function startScan() {
 function onScanProgress(m) {
   if (!m) return;
   if (m.phase === 'wantlist') { $('scan-text').textContent = 'Fetching your wantlist…'; $('scan-fill').style.width = '3%'; return; }
+  if (m.phase === 'prices') {
+    const total = m.total || 1;
+    $('scan-fill').style.width = Math.min(100, Math.round((m.checked / total) * 100)) + '%';
+    $('scan-text').textContent = `Checking real sold prices ${m.checked}/${total} · ${m.found} deal${m.found === 1 ? '' : 's'}`;
+    return;
+  }
   if (m.phase === 'done') {
     $('scan-fill').style.width = '100%';
     $('scan-text').textContent = `Done — checked ${m.checked}, ${m.found} candidate${m.found === 1 ? '' : 's'}${m.aborted ? ' (stopped early)' : ''}.`;
