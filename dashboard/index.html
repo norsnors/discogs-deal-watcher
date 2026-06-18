@@ -61,6 +61,7 @@
     </label>
     <label class="f checkbox" title="Only show copies confirmed VG+ or better (scan deals use the real listing grade; cloud deals fall back to a price estimate)"><input type="checkbox" id="vgPlusOnly" checked /> VG+ only</label>
     <label class="f checkbox"><input type="checkbox" id="freshOnly" /> Just listed</label>
+    <label class="f checkbox" title="Reveal deals you've hidden with the × button"><input type="checkbox" id="showHidden" /> Show hidden</label>
     <span class="spacer"></span>
     <span class="count" id="resultCount"></span>
   </section>
@@ -95,6 +96,14 @@
           <input type="password" id="set-token" placeholder="the DASHBOARD_TOKEN you set on the server" />
         </label>
       </div>
+      <label>Auto-scan on launch <span class="opt">(keeps sold-medians + the email watcher fresh)</span>
+        <select id="set-autoScan">
+          <option value="0">Off</option>
+          <option value="12">If last scan &gt; 12h ago</option>
+          <option value="24">If last scan &gt; 24h ago</option>
+          <option value="48">If last scan &gt; 48h ago</option>
+        </select>
+      </label>
       <div id="set-test" class="test-result"></div>
       <div class="modal-actions">
         <button id="set-test-btn" class="ghost">Test connection</button>

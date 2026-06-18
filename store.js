@@ -16,6 +16,11 @@ const path = require('path');
 
 const HISTORY_CAP = 60;
 const DEALS_CAP = 1000;
+// How many synthetic observations a re-seeded release gets. Must exceed the warm-up threshold
+// (warmupMin=4) so a release recovered from the committed seed counts as already warmed; capped so
+// the exported digest is stable run-to-run (it stops changing once a release passes this) -> tiny git churn.
+const SEED_WARM = 8;
+const round2 = (n) => (typeof n === 'number' && Number.isFinite(n) ? Math.round(n * 100) / 100 : null);
 
 function makeStore(dir) {
   fs.mkdirSync(dir, { recursive: true });
@@ -71,6 +76,48 @@ function makeStore(dir) {
     // dir can't carry them to GitHub) so the emailed deals are judged against true market value.
     primeSoldMedians(map) { if (map && typeof map === 'object') Object.assign(soldMedians, map); },
 
+    // --- durable warm-up + dedupe seed (survives Actions-cache eviction) ---
+    // The cloud's warm-up counts (history) and alert dedupe (alerted) normally live only in the
+    // Actions cache, which GitHub evicts after 7 days unused / under its 10 GB LRU cap. Losing it
+    // resets every release to "cold" (~4 sweeps of no alerts) AND wipes dedupe (a one-time re-flood).
+    // exportSeed() produces a TINY digest committed to the repo (like soldmedians.json); primeSeed()
+    // restores it on a cold start. Mirrors primeSoldMedians: in-memory only, no disk write here.
+    exportSeed() {
+      const seed = {};
+      const ids = new Set([...Object.keys(history), ...Object.keys(alerted)]);
+      for (const id of ids) {
+        const arr = history[id] || [];
+        const n = Math.min(arr.length, SEED_WARM);
+        const tmArr = arr.slice(-30).map((o) => o.lowest).filter((x) => typeof x === 'number' && x > 0).sort((a, b) => a - b);
+        const tm = tmArr.length ? round2(tmArr.length % 2 ? tmArr[(tmArr.length - 1) / 2] : (tmArr[tmArr.length / 2 - 1] + tmArr[tmArr.length / 2]) / 2) : null;
+        const al = alerted[id] ? round2(alerted[id].lowest) : null;
+        if (!n && al == null) continue;
+        const e = {};
+        if (n) e.n = n;
+        if (tm != null) e.tm = tm;
+        if (al != null) e.al = al;
+        seed[id] = e;
+      }
+      return seed;
+    },
+    // Restore warm-up + dedupe for releases the (possibly empty) cache doesn't already know. Fills
+    // `n` synthetic observations at the trailing median so historyCount + trailingMedianLowest both
+    // recover; never overwrites a release the cache already has (the cache is always the fresher copy).
+    primeSeed(map) {
+      if (!map || typeof map !== 'object') return 0;
+      let restored = 0;
+      for (const [id, e] of Object.entries(map)) {
+        if (!e) continue;
+        if (!history[id] || !history[id].length) {
+          const n = Math.max(0, Math.min(SEED_WARM, e.n || 0));
+          const v = typeof e.tm === 'number' ? e.tm : null;
+          if (n && v != null) { history[id] = Array.from({ length: n }, () => ({ ts: 0, lowest: v, numForSale: null })); restored++; }
+        }
+        if (e.al != null && !alerted[id]) alerted[id] = { lowest: e.al, ts: 0 };
+      }
+      return restored;
+    },
+
     // --- deals (dashboard feed) ---
     addDeal(deal) {
       deals.unshift(deal);
@@ -82,7 +129,7 @@ function makeStore(dir) {
   };
 }
 
-module.exports = { makeStore, HISTORY_CAP, DEALS_CAP };
+module.exports = { makeStore, HISTORY_CAP, DEALS_CAP, SEED_WARM };
 
 // --- tiny self-test (node store.js --selftest) -----------------------------
 if (require.main === module && process.argv.includes('--selftest')) {
@@ -116,6 +163,36 @@ if (require.main === module && process.argv.includes('--selftest')) {
   assert.strictEqual(s.getSoldMedian(200).median, 42, 'primed sold-median is readable');
   assert.ok(!fs.existsSync(path.join(tmp, 'soldmedians.json')), 'priming does NOT write soldmedians.json to disk');
 
+  // --- durable warm-up + dedupe seed (exportSeed / primeSeed) ---
+  // A WARMED release (400: 6 obs at 20) plus release 100 (3 obs [30,28,32], median 30, alerted at 12).
+  for (let i = 0; i < 6; i++) s.pushObservation(400, { ts: i, lowest: 20, numForSale: 3 });
+  const seed = s.exportSeed();
+  assert.strictEqual(seed[100].n, 3, 'exported warm-up count = historyCount (not yet warmed)');
+  assert.strictEqual(seed[100].tm, 30, 'exported trailing median');
+  assert.strictEqual(seed[100].al, 12, 'exported last-alerted lowest');
+  assert.strictEqual(seed[400].n, 6, 'exported warm-up count for the warmed release');
+
+  // A FRESH store (simulating a wiped Actions cache) recovers warm-up + dedupe from the digest.
+  const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), 'ddw-seed-'));
+  let s2 = makeStore(tmp2);
+  assert.strictEqual(s2.historyCount(400), 0, 'cold store starts empty');
+  const restored = s2.primeSeed(seed);
+  assert.ok(restored >= 2, 'primeSeed restored both releases with history');
+  assert.ok(s2.historyCount(400) >= 4, 'a warmed release recovers above the warm-up threshold (>=4)');
+  assert.strictEqual(s2.trailingMedianLowest(400), 20, 'recovered trailing median matches');
+  assert.strictEqual(s2.historyCount(100), 3, 'partial warm-up progress is preserved exactly (3 obs)');
+  assert.strictEqual(s2.getAlerted(100).lowest, 12, 'recovered alert-dedupe memory even without full history');
+
+  // primeSeed never clobbers a release the cache already has (cache is the fresher copy).
+  s2.pushObservation(400, { ts: 9, lowest: 99, numForSale: 1 });
+  s2.primeSeed({ 400: { n: 8, tm: 5, al: 1 } });
+  assert.strictEqual(s2.lastObservation(400).lowest, 99, 'existing history is not overwritten by a re-seed');
+
+  // export count caps at SEED_WARM so the digest stops changing once warmed (low git churn).
+  for (let i = 0; i < 20; i++) s.pushObservation(300, { ts: i, lowest: 10, numForSale: 2 });
+  assert.strictEqual(s.exportSeed()[300].n, SEED_WARM, 'exported warm-up count is capped at SEED_WARM');
+
+  fs.rmSync(tmp2, { recursive: true, force: true });
   fs.rmSync(tmp, { recursive: true, force: true });
   console.log('store selftest: all assertions passed');
 }

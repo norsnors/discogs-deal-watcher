@@ -18,8 +18,8 @@ const hasApi = typeof window.api !== 'undefined';
 
 const DEMO = [
   // Confirmed (scan) deals: real media condition read off the live listing.
-  { id: 'demo1', releaseId: 249504, artist: 'Imagination', title: 'Night Dubbing', lowest: 8.5, currency: 'EUR', shipping: 4.5, shipsFrom: 'Germany', numForSale: 14, vgPlusCount: 5, cheapVgPlusCount: 4, cheapVgPlusLow: 13, cheapVgPlusHigh: 17, altGrade: 'Near Mint (NM or M-)', altPrice: 14.5, altUrl: 'https://www.discogs.com/sell/item/112', reference: 32, referenceSource: 'sold-median', soldLow: 18, soldHigh: 45, discount: 0.73, conditionConfirmed: true, mediaCondition: 'Very Good Plus (VG+)', sleeveCondition: 'Very Good Plus (VG+)', cheaperWornPrice: 4.0, cheaperWornCondition: 'Good (G)', freshListing: true, ownDrop: 0.5, listingUrl: 'https://www.discogs.com/sell/item/111', url: 'https://www.discogs.com/sell/item/111', ts: Date.now() - 4 * 60000, thumb: '' },
-  { id: 'demo2', releaseId: 67890, artist: 'Gino Soccio', title: 'Outline', lowest: 11.0, currency: 'EUR', shipping: 0, shipsFrom: 'Netherlands', numForSale: 22, vgPlusCount: 8, reference: 30, referenceSource: 'suggestion', discount: 0.63, conditionConfirmed: true, mediaCondition: 'Near Mint (NM or M-)', sleeveCondition: 'Very Good (VG)', freshListing: false, ownDrop: 0.2, listingUrl: 'https://www.discogs.com/sell/item/222', url: 'https://www.discogs.com/sell/item/222', ts: Date.now() - 90 * 60000, thumb: '' },
+  { id: 'demo1', releaseId: 249504, artist: 'Imagination', title: 'Night Dubbing', lowest: 8.5, currency: 'EUR', shipping: 4.5, shipsFrom: 'Germany', numForSale: 14, vgPlusCount: 5, cheapVgPlusCount: 4, cheapVgPlusLow: 13, cheapVgPlusHigh: 17, altGrade: 'Near Mint (NM or M-)', altPrice: 14.5, altUrl: 'https://www.discogs.com/sell/item/112', reference: 32, referenceSource: 'sold-median', soldLow: 18, soldHigh: 45, discount: 0.73, conditionConfirmed: true, mediaCondition: 'Very Good Plus (VG+)', sleeveCondition: 'Very Good Plus (VG+)', cheaperWornPrice: 4.0, cheaperWornCondition: 'Good (G)', freshListing: true, ownDrop: 0.5, spark: [22, 20, 21, 19, 18, 17, 16, 15, 14, 12, 10, 8.5], listingUrl: 'https://www.discogs.com/sell/item/111', url: 'https://www.discogs.com/sell/item/111', ts: Date.now() - 4 * 60000, thumb: '' },
+  { id: 'demo2', releaseId: 67890, artist: 'Gino Soccio', title: 'Outline', lowest: 11.0, currency: 'EUR', shipping: 0, shipsFrom: 'Netherlands', numForSale: 22, vgPlusCount: 8, reference: 30, referenceSource: 'suggestion', discount: 0.63, conditionConfirmed: true, mediaCondition: 'Near Mint (NM or M-)', sleeveCondition: 'Very Good (VG)', freshListing: false, ownDrop: 0.2, spark: [13, 12, 12.5, 11.5, 12, 11.5, 12, 11.5, 11, 11.5, 11, 11], listingUrl: 'https://www.discogs.com/sell/item/222', url: 'https://www.discogs.com/sell/item/222', ts: Date.now() - 90 * 60000, thumb: '' },
   // Unconfirmed (cloud/API) deals: condition unknown -> only a price-proxy estimate, hidden by "VG+ only".
   { id: 'demo3', releaseId: 12345, artist: 'Klein & M.B.O.', title: 'Dirty Talk', lowest: 4.0, currency: 'EUR', numForSale: 3, reference: 26, referenceSource: 'trailing-median', discount: 0.85, conditionConfirmed: false, suspicious: true, pricedAsWorn: true, impliedGrade: null, freshListing: false, ownDrop: 0.7, url: 'https://www.discogs.com/sell/release/12345?sort=price%2Casc', ts: Date.now() - 32 * 60000, thumb: '' },
   { id: 'demo4', releaseId: 1111, artist: 'Mr. Flagio', title: 'Take A Chance', lowest: 2.0, currency: 'EUR', numForSale: 1, reference: 120, referenceSource: 'suggestion', discount: 0.98, conditionConfirmed: false, suspicious: true, pricedAsWorn: true, impliedGrade: null, freshListing: true, ownDrop: 0.9, url: 'https://www.discogs.com/sell/release/1111?sort=price%2Casc', ts: Date.now() - 1 * 60000, thumb: '' },
@@ -32,6 +32,16 @@ let viewMode = 'cloud';   // 'cloud' | 'scan'
 let scanning = false;
 
 const $ = (id) => document.getElementById(id);
+const openUrl = (url) => { if (!url) return; if (hasApi) window.api.openExternal(url); else window.open(url, '_blank'); };
+
+// --- Dismiss / snooze (client-side, persisted) ---
+// Keyed by releaseId (deal ids change every sweep; the release is the stable identity). A dismissed
+// release is hidden until you tick "show hidden" and restore it — keeps deals you've already judged
+// out of the way without losing them.
+const DISMISS_KEY = 'ddw-dismissed';
+function loadDismissed() { try { return new Set(JSON.parse(localStorage.getItem(DISMISS_KEY) || '[]').map(String)); } catch { return new Set(); } }
+let dismissed = loadDismissed();
+const saveDismissed = () => { try { localStorage.setItem(DISMISS_KEY, JSON.stringify([...dismissed])); } catch { /* private mode */ } };
 const sym = (c) => ({ EUR: '€', USD: '$', GBP: '£' }[c] || '');
 const money = (v, c) => (v == null ? '—' : sym(c) + Number(v).toFixed(2));
 const pct = (d) => (d == null ? '—' : Math.round(d * 100) + '%');
@@ -120,8 +130,34 @@ function conditionChip(d) {
   return `<span class="tag" title="Condition not verified — check on Discogs">condition unknown</span>`;
 }
 
+// Tiny inline SVG of the release's recent lowest-price trail (oldest -> newest). Lets you see at a
+// glance whether the current price is a real dip or just the release's normal floor. The last point
+// is dotted green when it's the lowest in the window (a genuine new low), amber otherwise.
+function sparkline(spark) {
+  if (!Array.isArray(spark) || spark.length < 3) return '';
+  const w = 72, h = 20, pad = 2;
+  const min = Math.min(...spark), max = Math.max(...spark);
+  const span = max - min || 1;
+  const n = spark.length;
+  const x = (i) => pad + (i * (w - 2 * pad)) / (n - 1);
+  const y = (v) => h - pad - ((v - min) / span) * (h - 2 * pad);
+  const pts = spark.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const last = spark[n - 1];
+  const isLow = last <= min + 1e-9;
+  const dotColor = isLow ? 'var(--green)' : 'var(--amber)';
+  return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true" preserveAspectRatio="none">
+    <polyline points="${pts}" fill="none" stroke="var(--muted)" stroke-width="1.25" stroke-linejoin="round" stroke-linecap="round" />
+    <circle cx="${x(n - 1).toFixed(1)}" cy="${y(last).toFixed(1)}" r="2.2" fill="${dotColor}" />
+  </svg>`;
+}
+
 function card(d) {
   const fresh = d.freshListing ? `<span class="tag fresh">🆕 just listed</span>` : '';
+  const isHidden = dismissed.has(String(d.releaseId));
+  const dismissBtn = isHidden
+    ? `<button class="dismiss restore" data-rid="${esc(String(d.releaseId))}" title="Restore this deal">↩</button>`
+    : `<button class="dismiss" data-rid="${esc(String(d.releaseId))}" title="Hide this deal">×</button>`;
+  const spark = sparkline(d.spark);
   const ships = d.shipsFrom ? `<span class="tag">from ${esc(d.shipsFrom)}</span>` : '';
   const thumb = d.thumb
     ? `<img class="thumb" src="${esc(d.thumb)}" alt="" referrerpolicy="no-referrer" />`
@@ -142,7 +178,8 @@ function card(d) {
   const alt = (d.altGrade && d.altPrice != null)
     ? `<div class="note">↑ or ${money(d.altPrice, d.currency)} for a ${esc(gradeShort(d.altGrade))} copy${d.altUrl ? ` <a class="altlink" data-url="${esc(d.altUrl)}" href="#">view</a>` : ''}</div>` : '';
   const buyLabel = d.listingUrl ? 'Buy this copy on Discogs &rarr;' : 'View &amp; buy on Discogs &rarr;';
-  return `<article class="card${d.freshListing ? ' is-fresh' : ''}${d.conditionConfirmed ? ' is-verified' : ''}">
+  return `<article class="card${d.freshListing ? ' is-fresh' : ''}${d.conditionConfirmed ? ' is-verified' : ''}${isHidden ? ' is-hidden' : ''}">
+    ${dismissBtn}
     <span class="when">${viewMode === 'scan' ? 'live' : ago(d.ts)}</span>
     ${thumb}
     <div class="body">
@@ -151,6 +188,7 @@ function card(d) {
       <div class="price-row">
         <span class="price">${money(d._total, d.currency)}</span>
         <span class="discount">${pct(d._eff)} off</span>
+        ${spark}
       </div>
       <div class="subprice">${shipNote}</div>
       <div class="ref">vs ${money(d.reference, d.currency)} ${REF_LABEL[d.referenceSource] || 'ref'}${d.soldLow != null && d.soldHigh != null ? ` (${money(d.soldLow, d.currency)}–${money(d.soldHigh, d.currency)})` : ''}${save} · ${forSale}</div>
@@ -170,7 +208,9 @@ function applyFilters(deals) {
   const maxT = parseFloat($('maxTotal').value) || 0;
   const freshOnly = $('freshOnly').checked;
   const vgOnly = $('vgPlusOnly').checked;
+  const showHidden = $('showHidden').checked;
   return deals.filter((d) => {
+    if (!showHidden && dismissed.has(String(d.releaseId))) return false;
     if (minV > 0 && (d.reference == null || d.reference < minV)) return false;
     if ((d._eff ?? 0) < minD) return false;
     if (maxT > 0 && (d._total == null || d._total > maxT)) return false;
@@ -200,7 +240,9 @@ function render() {
   deals = sortDeals(deals, $('sortBy').value);
   const wrap = $('deals');
   const empty = $('empty');
-  $('resultCount').textContent = deals.length ? `${deals.length} of ${allDeals.length}${viewMode === 'scan' ? ' · live scan' : ''}` : '';
+  const hiddenCount = allDeals.reduce((acc, d) => acc + (dismissed.has(String(d.releaseId)) ? 1 : 0), 0);
+  const hiddenNote = hiddenCount ? ` · ${hiddenCount} hidden` : '';
+  $('resultCount').textContent = deals.length ? `${deals.length} of ${allDeals.length}${hiddenNote}${viewMode === 'scan' ? ' · live scan' : ''}` : '';
   if (!deals.length) {
     wrap.innerHTML = '';
     empty.classList.remove('hidden');
@@ -211,9 +253,14 @@ function render() {
   }
   empty.classList.add('hidden');
   wrap.innerHTML = deals.map(card).join('');
-  const open = (url) => { if (!url) return; if (hasApi) window.api.openExternal(url); else window.open(url, '_blank'); };
-  wrap.querySelectorAll('.buy').forEach((b) => b.addEventListener('click', () => open(b.getAttribute('data-url'))));
-  wrap.querySelectorAll('.altlink').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); open(a.getAttribute('data-url')); }));
+  wrap.querySelectorAll('.buy').forEach((b) => b.addEventListener('click', () => openUrl(b.getAttribute('data-url'))));
+  wrap.querySelectorAll('.altlink').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); openUrl(a.getAttribute('data-url')); }));
+  wrap.querySelectorAll('.dismiss').forEach((b) => b.addEventListener('click', () => {
+    const rid = b.getAttribute('data-rid');
+    if (dismissed.has(rid)) dismissed.delete(rid); else dismissed.add(rid);
+    saveDismissed();
+    render();
+  }));
 }
 
 function setStatus(ok, statusObj) {
@@ -234,9 +281,11 @@ function notifyNew(deals) {
   if (fresh.length && 'Notification' in window && Notification.permission === 'granted') {
     const d = fresh[0];
     const extra = fresh.length > 1 ? ` (+${fresh.length - 1} more)` : '';
-    new Notification(`💸 Discogs deal: ${money(d.lowest, d.currency)} (${pct(d.discount)} off)`, {
+    const n = new Notification(`💸 Discogs deal: ${money(d.lowest, d.currency)} (${pct(d.discount)} off)`, {
       body: `${d.artist || ''} – ${d.title || ''}${extra}`,
     });
+    // Click the notification -> open the deal straight on Discogs.
+    n.onclick = () => { openUrl(d.url); window.focus(); };
   }
 }
 
@@ -300,6 +349,21 @@ async function startScan() {
   }
 }
 
+// Auto-scan: keep the real per-copy condition + sold-medians fresh (and thus the cloud emails sharp)
+// without the user having to remember to click "Scan now". Runs on launch — and periodically while
+// the app stays open — only when the last scan is older than the configured age (0 = off). Because a
+// scan pushes soldmedians.json as YOU, regular auto-scans also keep the GitHub cron from being
+// disabled after 60 days of no user activity.
+async function maybeAutoScan() {
+  if (!hasApi || scanning || viewMode === 'scan') return;
+  let s; try { s = await window.api.getSettings(); } catch { return; }
+  const hrs = Number(s.autoScanOnLaunchHours || 0);
+  if (!hrs) return;
+  let last; try { last = await window.api.scrapeLast(); } catch { last = null; }
+  const ageH = last && last.ts ? (Date.now() - last.ts) / 3600000 : Infinity;
+  if (ageH >= hrs) startScan();
+}
+
 function onScanProgress(m) {
   if (!m) return;
   if (m.phase === 'wantlist') { $('scan-text').textContent = 'Fetching your wantlist…'; $('scan-fill').style.width = '3%'; return; }
@@ -337,12 +401,13 @@ function toggleSrc() {
 }
 
 async function openSettings() {
-  const s = hasApi ? await window.api.getSettings() : { sourceType: 'github', githubRepo: 'norsnors/discogs-deal-watcher', githubToken: '', apiBase: '', token: '' };
+  const s = hasApi ? await window.api.getSettings() : { sourceType: 'github', githubRepo: 'norsnors/discogs-deal-watcher', githubToken: '', apiBase: '', token: '', autoScanOnLaunchHours: 24 };
   $('set-sourceType').value = s.sourceType || 'github';
   $('set-apiBase').value = s.apiBase || '';
   $('set-token').value = s.token || '';
   $('set-githubRepo').value = s.githubRepo || '';
   $('set-githubToken').value = s.githubToken || '';
+  $('set-autoScan').value = String(s.autoScanOnLaunchHours ?? 24);
   toggleSrc();
   $('set-test').textContent = '';
   $('set-test').className = 'test-result';
@@ -357,11 +422,20 @@ function collectSettings() {
     token: $('set-token').value.trim(),
     githubRepo: $('set-githubRepo').value.trim(),
     githubToken: $('set-githubToken').value.trim(),
+    autoScanOnLaunchHours: parseInt($('set-autoScan').value, 10) || 0,
   };
 }
 
+// Merge over the persisted settings so saving the modal never drops keys it doesn't render
+// (e.g. autoPushMedians, githubBranch).
+async function persistSettings() {
+  if (!hasApi) return;
+  const cur = await window.api.getSettings().catch(() => ({}));
+  await window.api.saveSettings({ ...cur, ...collectSettings() });
+}
+
 async function saveSettings() {
-  if (hasApi) await window.api.saveSettings(collectSettings());
+  await persistSettings();
   closeSettings();
   viewMode = 'cloud'; firstLoad = true; seenIds = new Set();
   refresh();
@@ -371,7 +445,7 @@ async function testConnection() {
   const el = $('set-test');
   el.textContent = 'Testing…'; el.className = 'test-result';
   if (!hasApi) { el.textContent = 'Demo mode (no Electron bridge).'; return; }
-  await window.api.saveSettings(collectSettings());
+  await persistSettings();
   try {
     const deals = await window.api.getDeals(200);
     let extra = '';
@@ -399,6 +473,7 @@ window.addEventListener('DOMContentLoaded', () => {
   $('sortBy').addEventListener('change', render);
   $('freshOnly').addEventListener('change', render);
   $('vgPlusOnly').addEventListener('change', render);
+  $('showHidden').addEventListener('change', render);
   $('minValue').addEventListener('input', () => { const v = parseInt($('minValue').value, 10); $('minValueVal').textContent = v > 0 ? `€${v}+` : 'any'; render(); });
   $('minDiscount').addEventListener('input', () => { $('minDiscountVal').textContent = $('minDiscount').value + '%'; render(); });
   $('maxTotal').addEventListener('input', () => { const v = parseInt($('maxTotal').value, 10); $('maxTotalVal').textContent = v > 0 ? `€${v}` : 'any'; render(); });
@@ -408,5 +483,9 @@ window.addEventListener('DOMContentLoaded', () => {
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
 
   refresh();
-  if (hasApi) setInterval(refresh, 30_000); // poll the cloud every 30s (paused during a local scan)
+  if (hasApi) {
+    setInterval(refresh, 30_000); // poll the cloud every 30s (paused during a local scan)
+    maybeAutoScan();              // auto-scan on launch if the last scan is stale (keeps emails sharp)
+    setInterval(maybeAutoScan, 60 * 60_000); // re-check hourly while the app stays open
+  }
 });

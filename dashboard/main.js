@@ -33,6 +33,7 @@ const DEFAULT_SETTINGS = {
   apiBase: 'http://localhost:8787',
   token: '',
   autoPushMedians: true, // after a scan, auto commit+push soldmedians.json so the cloud emails use it
+  autoScanOnLaunchHours: 24, // auto-run a local scan on launch if the last one is older than this (0 = off)
 };
 
 function readSettings() {
@@ -362,6 +363,8 @@ async function runScrape(win) {
         numForSale: c.stats.numForSale,
         soldMedian: sold ? sold.median : null, soldLow: sold ? sold.low : null, soldHigh: sold ? sold.high : null, lastSold: sold ? sold.lastSold : null,
         freshListing: c.freshListing,
+        // Recent lowest-price trail (oldest -> newest) for the dashboard sparkline.
+        spark: store.getHistory(c.rel.releaseId).slice(-12).map((o) => o.lowest).filter((x) => typeof x === 'number' && x > 0),
         releaseUrl: engine.releaseUrl(c.rel.releaseId), ts: Date.now(),
       };
 

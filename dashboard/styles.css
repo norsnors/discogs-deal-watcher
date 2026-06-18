@@ -114,6 +114,8 @@ input[type="range"] { accent-color: var(--accent); }
 .card .artist { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
 .card .price-row { display: flex; align-items: baseline; gap: 8px; }
 .card .price { font-size: 22px; font-weight: 800; color: var(--green); }
+/* Recent lowest-price trail. Pushed to the right of the price row; sits on the baseline. */
+.card .spark { margin-left: auto; align-self: center; opacity: .85; overflow: visible; }
 .card .discount {
   font-size: 12px; font-weight: 700; color: #0b2417; background: var(--green);
   padding: 2px 7px; border-radius: 6px;
@@ -139,7 +141,16 @@ input[type="range"] { accent-color: var(--accent); }
   font-size: 13px; font-weight: 650; border: none;
 }
 .card .buy:hover { background: var(--green); }
-.card .when { position: absolute; top: 12px; right: 14px; color: var(--muted); font-size: 11px; }
+.card .when { position: absolute; top: 12px; right: 30px; color: var(--muted); font-size: 11px; }
+/* Hide / restore a deal you've already judged. Subtle until hovered. */
+.card .dismiss {
+  position: absolute; top: 6px; right: 8px; width: 20px; height: 20px; padding: 0;
+  border: none; background: transparent; color: var(--muted); font-size: 16px; line-height: 18px;
+  border-radius: 5px; cursor: pointer; opacity: .5;
+}
+.card .dismiss:hover { opacity: 1; background: #ffffff14; color: var(--text); }
+.card .dismiss.restore { color: var(--accent); opacity: .85; font-size: 14px; }
+.card.is-hidden { opacity: .55; }
 
 .empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--muted); padding: 40px; text-align: center; }
 .hidden { display: none !important; }

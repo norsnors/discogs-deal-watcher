@@ -44,9 +44,27 @@ async function main() {
     if (n) { store.primeSoldMedians(sm); console.log(`Loaded ${n} committed sold-medians (real-market references).`); }
   } catch { /* none committed yet -> suggestion fallback (unchanged behaviour) */ }
 
+  // Restore warm-up counts + alert dedupe from the committed seed for any release the Actions cache
+  // lost (eviction after 7d unused / under the 10 GB cap). Without this, a wiped cache resets every
+  // release to "cold" (~4 sweeps of no alerts) AND wipes dedupe (a one-time re-flood). The cache,
+  // when present, is always the fresher copy — primeSeed only fills releases it doesn't already have.
+  try {
+    const seed = JSON.parse(fs.readFileSync(path.join(__dirname, 'state-seed.json'), 'utf8'));
+    const restored = store.primeSeed(seed);
+    if (restored) console.log(`Cache miss recovery: re-seeded warm-up/dedupe for ${restored} release(s) from state-seed.json.`);
+  } catch { /* no seed committed yet, or cache already warm -> nothing to recover */ }
+
   const client = makeClient({ token: config.token, userAgent: config.userAgent });
   const mailer = makeMailer(config.email);
   const sliceSize = config.sliceSize || 50;
+
+  // Deliverability guard: the Resend SANDBOX sender (onboarding@resend.dev) is testing-only — Resend
+  // flags it as spam-prone and only delivers to your own verified address. For a tool whose whole
+  // value is "an email arrives", a spam-foldered mail = silent total failure. Warn loudly here; the
+  // real fix is verifying a sending domain in Resend (see README "Email deliverability").
+  if (mailer.enabled && mailer.provider === 'resend' && /onboarding@resend\.dev/i.test(config.email.from || '')) {
+    console.warn('⚠ Using the Resend SANDBOX sender (onboarding@resend.dev) — high spam risk. Verify a domain in Resend and set MAIL_FROM. See README.');
+  }
 
   // Refresh the wantlist at most every wantlistRefreshMs (it changes rarely).
   const cur = readCursor();
@@ -89,22 +107,34 @@ async function main() {
   // best-first (just-listed + real-sold-price + biggest discount rank highest).
   deals.sort((a, b) => engine.dealValueScore(b) - engine.dealValueScore(a));
 
+  let emailError = null;
   if (deals.length) {
     for (const d of deals) console.log(`  DEAL${d.freshListing ? ' 🆕just-listed' : ''} ${d.artist} – ${d.title}  ${d.currency} ${d.lowest} (${Math.round(d.discount * 100)}% off${d.suspicious ? ', ⚠maybe<VG+' : ''})`);
     if (mailer.enabled) {
       try { await mailer.sendDeals(deals); console.log(`Emailed ${deals.length} deal(s) to ${config.email.to}.`); }
-      catch (e) { console.log('Email FAILED:', e.message); }
+      catch (e) { emailError = e; console.log('Email FAILED:', e.message); }
     } else {
       console.log('Email disabled — deals saved for the dashboard.');
     }
   }
 
   publishDeals(store);
+
+  // Turn a silent email failure into a LOUD one: exit non-zero so the GitHub Actions step fails and
+  // GitHub's built-in "your workflow failed" notification reaches you. For a tool whose core output IS
+  // the email, a swallowed send error means you simply stop getting deals and never find out. The
+  // deals are already saved to deals.json above, so the dashboard still updates regardless.
+  if (emailError) { console.error('Exiting non-zero because the deal email failed to send.'); process.exit(1); }
 }
 
-// Write deals.json at the repo root for the dashboard (the workflow commits this file).
+// Write deals.json (for the dashboard) + state-seed.json (durable warm-up/dedupe backup) at the repo
+// root; the workflow commits both. The seed is a tiny digest that's stable run-to-run once releases
+// warm up, so it adds almost no git churn — but it lets a future run rebuild warm-up + dedupe if the
+// Actions cache is ever evicted (the cache is the only other place that state lives).
 function publishDeals(store) {
   fs.writeFileSync(path.join(__dirname, 'deals.json'), JSON.stringify(store.getDeals(200)));
+  try { fs.writeFileSync(path.join(__dirname, 'state-seed.json'), JSON.stringify(store.exportSeed())); }
+  catch (e) { console.log('Could not write state-seed.json:', e.message); }
 }
 
 main().catch((e) => { console.error('watch-once FAILED:', e.stack || e); process.exit(1); });

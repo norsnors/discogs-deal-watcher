@@ -58,10 +58,19 @@ jobs:
           SHIPPING_ESTIMATE: '5'   # add EUR5 to the item price; the alert threshold uses the total
         run: node watch-once.js
 
-      - name: Publish deals.json for the dashboard
+      - name: Publish deals.json + state-seed.json for the dashboard / cache recovery
         run: |
           git config user.name "deal-watcher"
           git config user.email "deal-watcher@users.noreply.github.com"
-          git add deals.json
+          git add deals.json state-seed.json
           git commit -m "deals update [skip ci]" || echo "no changes"
           git push || echo "nothing to push"
+
+      # Keep the cron alive: GitHub disables scheduled workflows after 60 days with no *user* activity,
+      # and the commits above (made by the built-in Actions bot) do NOT reset that timer — so without
+      # this the watcher would silently die two months after your last manual push. This action makes a
+      # keepalive commit that counts. (Regular local dashboard scans also push as YOU and keep it alive,
+      # so this is a backstop.) continue-on-error so a keepalive hiccup never fails the actual sweep.
+      - name: Keep the schedule alive (avoid the 60-day auto-disable)
+        continue-on-error: true
+        uses: gautamkrishnar/keepalive-workflow@v2

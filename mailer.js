@@ -94,13 +94,17 @@ const RESEND_DEFAULT_FROM = 'Discogs Deal Watcher <onboarding@resend.dev>';
 
 // Pure: the JSON body sent to the Resend API. Exported for testing.
 function buildResendPayload(cfg, mail) {
-  return {
+  const payload = {
     from: cfg.from || RESEND_DEFAULT_FROM,
     to: Array.isArray(cfg.to) ? cfg.to : [cfg.to],
     subject: mail.subject,
     html: mail.html,
     text: mail.text,
   };
+  // A reply-to (e.g. your own address) lets you reply to a deal mail and helps some inbox providers
+  // treat the message as legitimate — a small deliverability nudge while sending from the sandbox.
+  if (cfg.replyTo) payload.reply_to = cfg.replyTo;
+  return payload;
 }
 
 function disabledMailer(provider, why) {
@@ -146,13 +150,14 @@ function gmailMailer(cfg) {
   });
   const to = cfg.to || user;
   const from = cfg.from || `Discogs Deal Watcher <${user}>`;
+  const replyTo = cfg.replyTo || undefined;
   return {
     enabled: true,
     provider: 'gmail',
     transport,
     async verify() { return transport.verify(); },
-    async send({ subject, text, html }) { return transport.sendMail({ from, to, subject, text, html }); },
-    async sendDeals(deals) { const m = renderDealsEmail(deals); return transport.sendMail({ from, to, ...m }); },
+    async send({ subject, text, html }) { return transport.sendMail({ from, to, replyTo, subject, text, html }); },
+    async sendDeals(deals) { const m = renderDealsEmail(deals); return transport.sendMail({ from, to, replyTo, ...m }); },
   };
 }
 
@@ -199,6 +204,9 @@ if (require.main === module && process.argv.includes('--selftest')) {
   const payload = buildResendPayload({ apiKey: 'x', to: 'me@gmail.com' }, { subject: 'S', html: '<b>H</b>', text: 'T' });
   assert.deepStrictEqual(payload.to, ['me@gmail.com'], 'to is wrapped in an array');
   assert.ok(/onboarding@resend\.dev/.test(payload.from), 'default from is the Resend sandbox sender');
+  assert.ok(!('reply_to' in payload), 'no reply_to unless configured');
+  const payloadRt = buildResendPayload({ apiKey: 'x', to: 'me@gmail.com', replyTo: 'me@gmail.com' }, { subject: 'S', html: 'H', text: 'T' });
+  assert.strictEqual(payloadRt.reply_to, 'me@gmail.com', 'replyTo maps to the Resend reply_to field');
 
   // Resend send via fake fetch: asserts URL, auth header, and body.
   (async () => {

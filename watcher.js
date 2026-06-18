@@ -66,6 +66,7 @@ function loadConfig() {
         provider, apiKey, user, appPassword,
         to: env.MAIL_TO || fe.to || g.to || '',
         from: env.MAIL_FROM || fe.from || g.from || '',
+        replyTo: env.MAIL_REPLY_TO || fe.replyTo || g.replyTo || '',
       };
     })(),
   };
@@ -148,6 +149,9 @@ async function processRelease(rel, deps) {
     impliedGrade: sig.impliedGrade,
     pricedAsWorn: sig.pricedAsWorn,
     ownDrop: sig.ownDrop,
+    // Recent lowest-price trail (oldest -> newest) so the dashboard can draw a sparkline and the user
+    // can see at a glance whether this is a real dip or just the release's normal floor.
+    spark: store.getHistory(rel.releaseId).slice(-12).map((o) => o.lowest).filter((x) => typeof x === 'number' && x > 0),
     confidence: sig.confidence,
     suspicious: sig.suspicious,
     freshListing,

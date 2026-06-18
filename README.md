@@ -252,6 +252,29 @@ fly deploy
 Dashboard → source **Live server**, URL `https://<app>.fly.dev`, the `DASHBOARD_TOKEN`. (Any Node host
 — Railway, a €4 VPS — works: set env vars, `node watcher.js`, expose the port, mount a volume at `state/`.)
 
+### Reliability — the email is the product, so don't let it fail *silently*
+
+Three things can make the watcher stop working without any error you'd notice. All three are now guarded:
+
+- **Email deliverability.** The default sender `onboarding@resend.dev` is Resend's **sandbox** address:
+  spam-prone and only deliverable to your own verified email. A deal mail in the spam folder = total
+  silent failure. **Fix: verify a sending domain in Resend** (DKIM/SPF/DMARC) and set `MAIL_FROM` to an
+  address on it. Until then, add a Gmail filter to never mark these as spam, and watch the Resend logs.
+  `watch-once.js` logs a warning whenever it's still using the sandbox sender; a `replyTo` (config
+  `email.replyTo` / `MAIL_REPLY_TO`) is added as a small legitimacy nudge.
+- **Lost state.** Warm-up counts + alert dedupe live in the Actions cache, which GitHub evicts (7 days
+  unused / 10 GB LRU). To survive that, each run also commits a tiny **`state-seed.json`** digest to the
+  repo (like `soldmedians.json`); a cold run rebuilds warm-up + dedupe from it, so a wiped cache no
+  longer means ~4 sweeps of silence followed by a one-time re-alert flood.
+- **The cron getting disabled.** GitHub disables scheduled workflows after 60 days with no *user*
+  activity — and the bot's own `deals.json` commits **don't** reset that timer. A
+  [`keepalive-workflow`](https://github.com/gautamkrishnar/keepalive-workflow) step (and your regular
+  local **⚡ Scan now** pushes, which commit as *you*) keep it alive. If it ever does pause, just hit
+  **Run workflow** in the Actions tab or push any commit.
+
+A failed deal email now also **exits non-zero**, so GitHub's built-in "workflow failed" notification
+reaches you instead of the error being swallowed in a log nobody reads.
+
 ### Environment variables
 
 | Var | Meaning |
@@ -260,7 +283,8 @@ Dashboard → source **Live server**, URL `https://<app>.fly.dev`, the `DASHBOAR
 | `DISCOGS_TOKEN` | personal access token (recommended; enables price suggestions + 60/min) |
 | `RESEND_API_KEY` | Resend API key (recommended email path) |
 | `GMAIL_USER` / `GMAIL_APP_PASSWORD` | Gmail alternative (SMTP; Node host only) |
-| `MAIL_TO` / `MAIL_FROM` | where alerts go / sender (default `onboarding@resend.dev`) |
+| `MAIL_TO` / `MAIL_FROM` | where alerts go / sender (default `onboarding@resend.dev` — sandbox, verify a domain) |
+| `MAIL_REPLY_TO` | optional reply-to address (small deliverability nudge) |
 | `EMAIL_PROVIDER` | `resend` (default if key present) or `gmail` |
 | `MODE` | `balanced` (default) / `sensitive` / `strict` |
 | `SLICE_SIZE` | releases checked per `watch-once.js` run, by watch-score priority (GitHub model, default 200) |
