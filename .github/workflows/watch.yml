@@ -49,8 +49,10 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
           MAIL_FROM: ${{ secrets.MAIL_FROM }}
-          SLICE_SIZE: '200'   # priority sweep: top-200 by watch-score/run -> full coverage every ~4 runs (~1h),
-                              # hot/just-listed releases re-checked far sooner. ~4 min/run at 60 req/min.
+          SLICE_SIZE: '750'   # priority sweep: cover the WHOLE wantlist (~715) every run -> just-listed copies
+                              # detected within one cron interval (~15 min) instead of a ~1h rotation. At ~1.1s/call
+                              # a full sweep is ~13 min, fitting inside the 15-min window; if the list grows past
+                              # ~750 the staleness term rolls the overflow into the next run (no copy is starved).
           MODE: balanced
           MIN_REFERENCE: '25'      # skip low-value records: VG+ suggestion must be >= EUR25 (kills noise, keeps diamonds)
           SHIPPING_ESTIMATE: '5'   # add EUR5 to the item price; the alert threshold uses the total

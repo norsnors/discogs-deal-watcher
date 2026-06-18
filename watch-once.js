@@ -32,6 +32,18 @@ async function main() {
 
   fs.mkdirSync(STATE_DIR, { recursive: true });
   const store = makeStore(STATE_DIR);
+
+  // Seed REAL sales-history medians committed from local scans. They live at the repo root (the
+  // state/ dir is gitignored, so it can't carry them to GitHub) and are NOT in the Actions cache, so
+  // checkout always brings the freshest committed copy. With them, emailed deals are judged against
+  // true market value instead of Discogs's often-inflated VG+ suggestion; without them, nothing
+  // changes (processRelease falls back to the suggestion). Read-only here — the cloud never scrapes them.
+  try {
+    const sm = JSON.parse(fs.readFileSync(path.join(__dirname, 'soldmedians.json'), 'utf8'));
+    const n = sm && typeof sm === 'object' ? Object.keys(sm).length : 0;
+    if (n) { store.primeSoldMedians(sm); console.log(`Loaded ${n} committed sold-medians (real-market references).`); }
+  } catch { /* none committed yet -> suggestion fallback (unchanged behaviour) */ }
+
   const client = makeClient({ token: config.token, userAgent: config.userAgent });
   const mailer = makeMailer(config.email);
   const sliceSize = config.sliceSize || 50;
@@ -72,6 +84,10 @@ async function main() {
 
   const sweepsToCover = Math.ceil(N / take);
   console.log(`Checked ${checked}. Deals this run: ${deals.length}. (Full wantlist covered every ~${sweepsToCover} runs.)`);
+
+  // Lead with the strongest diamond: the email subject + first card come from deals[0], so order
+  // best-first (just-listed + real-sold-price + biggest discount rank highest).
+  deals.sort((a, b) => engine.dealValueScore(b) - engine.dealValueScore(a));
 
   if (deals.length) {
     for (const d of deals) console.log(`  DEAL${d.freshListing ? ' 🆕just-listed' : ''} ${d.artist} – ${d.title}  ${d.currency} ${d.lowest} (${Math.round(d.discount * 100)}% off${d.suspicious ? ', ⚠maybe<VG+' : ''})`);

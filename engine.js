@@ -180,6 +180,105 @@ function pricedAsWorn(lowest, ladder) {
 }
 
 /*
+ * selectByCondition(listings, opts) — the REAL-condition deal picker.
+ *
+ * Given the actual marketplace copies for a release (each with a real media condition + price +
+ * optional shipping — scraped from the live listing, NOT guessed from a price ladder), pick the
+ * CHEAPEST copy that meets the minimum condition (default VG+). This is what makes a scan-confirmed
+ * deal trustworthy: the discount is judged against a copy we KNOW is VG+ or better, instead of the
+ * absolute-cheapest copy (which on vinyl is very often a worn Good/VG copy). Ordering is by TOTAL
+ * (price + shipping) so a cheap-item/expensive-shipping copy doesn't masquerade as the best buy.
+ *
+ *   listings: [{ price, shipping?, media, sleeve?, url?, itemId?, shipsFrom? }]
+ *   opts.minCondition  default 'Very Good Plus (VG+)'
+ * returns {
+ *   best,            // cheapest copy meeting the bar, or null  { price, shipping, total, media, mediaRank, sleeve, url, itemId, shipsFrom }
+ *   cheapestAny,     // the absolute cheapest copy of any grade, or null (for "a worn copy is cheaper" context)
+ *   acceptableCount, // how many copies meet the condition bar
+ *   totalCount,      // copies with a usable price
+ *   unknownCount,    // copies whose grade we couldn't parse (counted, never selected)
+ * }
+ */
+function selectByCondition(listings, opts = {}) {
+  const minRank = conditionRank(opts.minCondition || 'Very Good Plus (VG+)');
+  const nearFactor = opts.nearFactor != null ? opts.nearFactor : 0.25; // "slightly more" = +25% of total ...
+  const nearAbs = opts.nearAbs != null ? opts.nearAbs : 3;             // ... or +€3, whichever is larger
+  const norm = (Array.isArray(listings) ? listings : [])
+    .map((l) => {
+      const price = num(l.price);
+      const shipping = num(l.shipping); // null = unknown shipping (excluded from total, but kept)
+      const mediaRank = conditionRank(l.media);
+      return {
+        price,
+        shipping,
+        total: price == null ? null : price + (shipping == null ? 0 : shipping),
+        media: l.media || null,
+        mediaRank,
+        sleeve: l.sleeve || null,
+        itemId: l.itemId || null,
+        url: l.url || (l.itemId ? listingUrl(l.itemId) : null),
+        shipsFrom: l.shipsFrom || null,
+      };
+    })
+    .filter((l) => l.price != null && l.price > 0)
+    .sort((a, b) => (a.total ?? a.price) - (b.total ?? b.price));
+  const acceptable = minRank == null ? [] : norm.filter((l) => l.mediaRank != null && l.mediaRank <= minRank);
+  const best = acceptable[0] || null;
+
+  // "Slightly dearer but better" — the cheapest acceptable copy of a STRICTLY better grade than
+  // `best`, priced within `near` of best's total. Lets the UI offer "€8 VG+ · or €10 NM".
+  let betterAlt = null;
+  if (best && best.mediaRank != null) {
+    const bestTotal = best.total ?? best.price;
+    const ceiling = bestTotal + Math.max(nearAbs, bestTotal * nearFactor);
+    betterAlt = acceptable.find((l) => l.mediaRank != null && l.mediaRank < best.mediaRank && (l.total ?? l.price) <= ceiling) || null;
+  }
+
+  return {
+    best,
+    betterAlt,
+    acceptable,           // all VG+-or-better copies, sorted by total asc (for cluster analysis)
+    cheapestAny: norm[0] || null,
+    acceptableCount: acceptable.length,
+    totalCount: norm.length,
+    unknownCount: norm.filter((l) => l.mediaRank == null).length,
+  };
+}
+
+/*
+ * cheapCluster(copies, reference, minDiscount) — how many of these copies are ALL meaningfully
+ * cheap vs the reference, and their price band. The signal: one copy far under a high median can be
+ * a fluke/mispricing, but a CLUSTER of copies far under means the market actually moved (the median
+ * is just stale) — a real, low-risk opportunity. Counts by TOTAL (price + shipping when known).
+ * Returns { count, low, high }.
+ */
+function cheapCluster(copies, reference, minDiscount = 0.5) {
+  const ref = num(reference);
+  if (!(ref > 0) || !Array.isArray(copies)) return { count: 0, low: null, high: null };
+  const cheap = copies
+    .map((c) => num(c.total != null ? c.total : c.price))
+    .filter((t) => t != null && t > 0 && 1 - t / ref >= minDiscount)
+    .sort((a, b) => a - b);
+  return { count: cheap.length, low: cheap[0] ?? null, high: cheap[cheap.length - 1] ?? null };
+}
+
+/*
+ * dealValueScore(d) — ranks EMAILED deals so the strongest diamond leads the inbox (the subject line
+ * + first card). Combines the discount with the live signals that matter most for "best deals fastest":
+ * a JUST-LISTED copy and a deal judged against the REAL sold price both rank higher; a "may be below
+ * VG+" copy is docked. Nothing is excluded — this is purely ordering (the user always sees every deal).
+ */
+function dealValueScore(d) {
+  if (!d) return 0;
+  const eff = num(d.effectiveDiscount);
+  let s = eff != null ? eff : (num(d.discount) || 0);
+  if (d.freshListing) s += 0.25;                       // the live event we hunt for
+  if (d.referenceSource === 'sold-median') s += 0.15;  // judged against true market value, not a guess
+  if (d.suspicious) s -= 0.1;                          // possibly sub-VG+ — still shown, just lower
+  return s;
+}
+
+/*
  * evaluateMarketSignal(input, opts) where
  *   input: {
  *     lowest            number   current cheapest price (any condition)
@@ -274,8 +373,13 @@ function evaluateMarketSignal(input, opts = {}) {
  */
 function shouldFire(sig, historyCount, opts = {}) {
   const { mode = 'balanced', ownDropFactor = 0.4, warmupMin = 4, warmupSensitive = 2, freshListing = false } = opts;
-  const warm = historyCount >= (mode === 'sensitive' ? warmupSensitive : warmupMin);
-  if (!warm) return false;
+  // Warm-up: learn the release's usual floor before alerting (kills the cold-start flood). But a
+  // JUST-LISTED copy is the highest-value event and bypasses the own-dip gate anyway, so it doesn't
+  // need a long trailing history — in balanced mode it qualifies on the lighter warm-up (we only need
+  // one prior observation to have detected the num_for_sale rise). Sensitive is always light; strict
+  // stays conservative (it ignores the fresh-listing shortcut, so it keeps the full warm-up too).
+  const lightWarmup = mode === 'sensitive' || (mode === 'balanced' && freshListing);
+  if (historyCount < (lightWarmup ? warmupSensitive : warmupMin)) return false;
   if (mode === 'sensitive') return sig.isDeal;
   const ownDipOk = sig.ownDrop != null && sig.ownDrop >= ownDropFactor;
   if (mode === 'strict') return sig.isDeal && ownDipOk && !sig.suspicious;
@@ -347,12 +451,15 @@ module.exports = {
   meetsCondition,
   evaluateDeal,
   evaluateMarketSignal,
+  dealValueScore,
   shouldFire,
   isFreshListing,
   releaseWatchScore,
   extractLadder,
   impliedGrade,
   pricedAsWorn,
+  selectByCondition,
+  cheapCluster,
   median,
   num,
   releaseMarketUrl,
@@ -497,6 +604,82 @@ if (require.main === module && process.argv.includes('--selftest')) {
   assert.strictEqual(s.impliedGrade, null, '€6 cheapest -> priced below Good');
   assert.ok(s.pricedAsWorn && s.suspicious && s.isDeal, 'still a deal, but flagged worn + suspicious for the user to judge');
 
+  // --- selectByCondition (REAL per-copy condition picker) ---
+  // A release with a worn cheap copy AND a VG+ copy: we must pick the VG+ one, not the cheapest.
+  const copies = [
+    { itemId: 1, media: 'Very Good (VG)', price: 4, shipping: 3 },
+    { itemId: 2, media: 'Very Good Plus (VG+)', price: 9, shipping: 4 }, // total 13
+    { itemId: 3, media: 'Near Mint (NM or M-)', price: 12, shipping: 3 }, // total 15
+    { itemId: 4, media: 'Mint (M)', price: 20, shipping: 0 },
+    { itemId: 5, media: 'Good (G)', price: 2, shipping: 2 }, // absolute cheapest, but worn
+  ];
+  let sel = selectByCondition(copies);
+  assert.strictEqual(sel.cheapestAny.itemId, 5, 'cheapestAny is the €2 Good copy');
+  assert.strictEqual(sel.best.itemId, 2, 'cheapest VG+-or-better is the €9 VG+ (total 13) over the NM (total 15)');
+  assert.strictEqual(sel.best.media, 'Very Good Plus (VG+)');
+  assert.ok(/\/sell\/item\/2$/.test(sel.best.url), 'best gets a direct listing URL from its itemId');
+  assert.strictEqual(sel.acceptableCount, 3, 'VG+, NM and M meet the VG+ bar');
+  assert.strictEqual(sel.totalCount, 5);
+
+  // No VG+ copy exists -> best is null (the scan drops the release; no false VG+ deal).
+  sel = selectByCondition([{ media: 'Very Good (VG)', price: 5 }, { media: 'Good (G)', price: 3 }]);
+  assert.strictEqual(sel.best, null, 'no copy meets VG+ -> best null');
+  assert.strictEqual(sel.cheapestAny.price, 3);
+
+  // Unparseable grades are counted but never selected.
+  sel = selectByCondition([{ media: 'Generic placeholder', price: 5 }, { media: 'VG+', price: 8 }]);
+  assert.strictEqual(sel.best.price, 8, 'unknown-grade copy skipped; the VG+ copy is chosen');
+  assert.strictEqual(sel.unknownCount, 1, 'the unparseable grade is counted as unknown');
+
+  // Shipping folds into the ordering: a VG+ at 10+0 beats an NM at 9+8 on total.
+  sel = selectByCondition([
+    { itemId: 10, media: 'VG+', price: 10, shipping: 0 },
+    { itemId: 11, media: 'NM', price: 9, shipping: 8 },
+  ]);
+  assert.strictEqual(sel.best.itemId, 10, 'cheapest by TOTAL (incl. shipping), not item price');
+
+  // Empty / junk input is safe.
+  assert.strictEqual(selectByCondition([]).best, null);
+  assert.strictEqual(selectByCondition(null).totalCount, 0);
+
+  // betterAlt: a strictly-better grade copy that is only slightly dearer than the cheapest VG+.
+  sel = selectByCondition([
+    { itemId: 1, media: 'VG+', price: 8, shipping: 0 },   // best (total 8)
+    { itemId: 2, media: 'NM', price: 10, shipping: 0 },   // better grade, +€2 -> within near -> alt
+    { itemId: 3, media: 'Mint (M)', price: 40, shipping: 0 }, // better grade but way dearer -> not alt
+  ]);
+  assert.strictEqual(sel.best.itemId, 1, 'cheapest VG+ is best');
+  assert.strictEqual(sel.betterAlt.itemId, 2, 'NM at +€2 is the slightly-dearer-but-better alternative');
+  // No better grade nearby -> no alt.
+  sel = selectByCondition([{ itemId: 1, media: 'VG+', price: 8 }, { itemId: 2, media: 'VG+', price: 9 }]);
+  assert.strictEqual(sel.betterAlt, null, 'no strictly-better grade -> no alternative');
+  // acceptable list is exposed and sorted by total.
+  assert.ok(Array.isArray(sel.acceptable) && sel.acceptable[0].itemId === 1, 'acceptable copies exposed, cheapest first');
+
+  // --- cheapCluster (the price-drop / market-moved signal) ---
+  // Reference 40; copies at 8,10,12 are all >=50% under -> a cluster of 3 (band €8–€12); the 30 isn't.
+  const clusterCopies = [{ total: 8 }, { total: 10 }, { total: 12 }, { total: 30 }];
+  let cl = cheapCluster(clusterCopies, 40, 0.5);
+  assert.strictEqual(cl.count, 3, 'three copies sit >=50% under the €40 reference');
+  assert.strictEqual(cl.low, 8, 'cluster low');
+  assert.strictEqual(cl.high, 12, 'cluster high');
+  // A lone cheap copy is a cluster of 1 (weaker signal, but reported).
+  cl = cheapCluster([{ total: 8 }, { total: 35 }, { total: 38 }], 40, 0.5);
+  assert.strictEqual(cl.count, 1, 'only one copy is meaningfully cheap');
+  // No reference -> empty (can't judge cheapness).
+  assert.strictEqual(cheapCluster([{ total: 8 }], null).count, 0, 'no reference -> no cluster');
+  assert.strictEqual(cheapCluster(null, 40).count, 0, 'null copies safe');
+
+  // --- dealValueScore (email ordering: the strongest diamond leads) ---
+  const dA = { discount: 0.6, freshListing: true, referenceSource: 'sold-median' };
+  const dB = { discount: 0.6, freshListing: false, referenceSource: 'suggestion' };
+  assert.ok(dealValueScore(dA) > dealValueScore(dB), 'a just-listed, real-sold-price deal outranks an equal-discount estimate');
+  const dSusp = { discount: 0.7, suspicious: true, referenceSource: 'suggestion' };
+  const dClean = { discount: 0.65, suspicious: false, referenceSource: 'sold-median' };
+  assert.ok(dealValueScore(dClean) > dealValueScore(dSusp), 'a clean real-sold deal outranks a slightly-bigger suspicious estimate');
+  assert.ok(dealValueScore({ effectiveDiscount: 0.5, discount: 0.7 }) === 0.5, 'effectiveDiscount (incl. shipping) is preferred over item-only discount');
+  assert.strictEqual(dealValueScore(null), 0, 'null deal scores 0');
+
   // --- shouldFire (warm-up + profiles) ---
   // A genuine dip: cheap vs suggestion AND a big own-dip.
   const dip = evaluateMarketSignal({ lowest: 5, suggestion: 40, suggestionLow: 22, trailingMedian: 12, prevAlertedLowest: null }, { minDiscount: 0.5 });
@@ -520,6 +703,14 @@ if (require.main === module && process.argv.includes('--selftest')) {
   assert.ok(!shouldFire(standingFresh, 10, { mode: 'balanced' }), 'balanced: cheap copy with no own-dip does NOT fire when not fresh');
   assert.ok(shouldFire(standingFresh, 10, { mode: 'balanced', freshListing: true }), 'balanced: a JUST-LISTED cheap new-low copy fires (the target event)');
   assert.ok(!shouldFire(standingFresh, 10, { mode: 'strict', freshListing: true }), 'strict ignores the fresh-listing shortcut');
+
+  // fresh-listing gets the LIGHTER warm-up in balanced: a just-listed deal fires after 2 obs, while a
+  // non-fresh deal still needs the full warm-up (4). Catches diamonds on releases we've only just begun
+  // tracking — without re-opening the cold-start flood for ordinary standing-price observations.
+  assert.ok(shouldFire(dip, 2, { mode: 'balanced', freshListing: true }), 'balanced: a fresh-listing deal fires after the light warm-up (2 obs)');
+  assert.ok(!shouldFire(dip, 2, { mode: 'balanced' }), 'balanced: a non-fresh deal still needs the full warm-up (4)');
+  assert.ok(!shouldFire(dip, 1, { mode: 'balanced', freshListing: true }), 'even a fresh listing needs >=2 obs (a prior observation to have detected the rise)');
+  assert.ok(!shouldFire(dip, 2, { mode: 'strict', freshListing: true }), 'strict keeps the full warm-up even for a fresh listing');
 
   // --- isFreshListing ---
   assert.ok(isFreshListing({ numForSale: 3 }, { numForSale: 4 }), 'num_for_sale rose -> a copy was just listed');

@@ -66,6 +66,10 @@ function makeStore(dir) {
     // --- cached real sales-history medians (from the local residential scrape) ---
     getSoldMedian(releaseId) { return soldMedians[releaseId] || null; },
     setSoldMedian(releaseId, v) { soldMedians[releaseId] = v; write('soldmedians.json', soldMedians); },
+    // Merge sold-medians into memory WITHOUT writing to disk. Used by the cloud watcher to seed the
+    // real sales-history medians that the local scan committed to the repo (the gitignored state/
+    // dir can't carry them to GitHub) so the emailed deals are judged against true market value.
+    primeSoldMedians(map) { if (map && typeof map === 'object') Object.assign(soldMedians, map); },
 
     // --- deals (dashboard feed) ---
     addDeal(deal) {
@@ -106,6 +110,11 @@ if (require.main === module && process.argv.includes('--selftest')) {
   assert.strictEqual(s.getSuggestion(100).vgplus, 30, 'suggestion persisted');
   assert.strictEqual(s.getDeals()[0].id, 'd1', 'deal persisted');
   assert.strictEqual(s.trailingMedianLowest(100), 30, 'history persisted');
+
+  // primeSoldMedians seeds in-memory medians without writing to disk (cloud reads committed medians).
+  s.primeSoldMedians({ 200: { median: 42, low: 30, high: 60 } });
+  assert.strictEqual(s.getSoldMedian(200).median, 42, 'primed sold-median is readable');
+  assert.ok(!fs.existsSync(path.join(tmp, 'soldmedians.json')), 'priming does NOT write soldmedians.json to disk');
 
   fs.rmSync(tmp, { recursive: true, force: true });
   console.log('store selftest: all assertions passed');

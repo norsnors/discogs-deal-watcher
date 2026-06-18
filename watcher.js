@@ -103,8 +103,14 @@ async function processRelease(rel, deps) {
 
   const trailingMedian = store.trailingMedianLowest(rel.releaseId, config.trailingN);
   const alerted = store.getAlerted(rel.releaseId);
+  // Real sales-history median (what copies ACTUALLY sell for) is the truest reference — far better
+  // than Discogs's often-inflated VG+ suggestion. It can only be scraped from a residential IP (the
+  // local dashboard scan), so the cloud reads it from the committed soldmedians.json seeded at startup;
+  // absent (a release never scanned) it falls back to the suggestion exactly as before.
+  const sold = store.getSoldMedian(rel.releaseId);
   const sig = engine.evaluateMarketSignal({
     lowest: stats.lowestPrice,
+    soldMedian: sold ? sold.median : null,
     suggestion: sug ? sug.vgplus : null,
     suggestionLow: sug ? sug.vg : null,
     ladder: sug ? sug.ladder : null,
@@ -131,6 +137,10 @@ async function processRelease(rel, deps) {
     numForSale: stats.numForSale,
     reference: sig.reference,
     referenceSource: sig.referenceSource,
+    soldMedian: sold ? sold.median : null,
+    soldLow: sold ? sold.low : null,
+    soldHigh: sold ? sold.high : null,
+    lastSold: sold ? sold.lastSold : null,
     discount: sig.discount,
     effectiveDiscount: sig.effectiveDiscount,
     total: sig.total,
@@ -256,6 +266,26 @@ if (require.main === module && process.argv.includes('--itest')) {
     assert.strictEqual(await processRelease(rel, deps), null, 'same dip price does not re-alert');
 
     assert.strictEqual(store.countDeals(), 1, 'exactly one deal recorded in balanced mode');
+
+    // --- sold-median seeding: a committed REAL median becomes the reference (the cloud-email quality fix).
+    // A just-listed copy (num_for_sale rising) fires on the light warm-up and is judged against the
+    // primed median (50), NOT the VG+ suggestion (30) — proving the cloud now uses true market value.
+    store.primeSoldMedians({ 777: { median: 50, low: 35, high: 70 } });
+    const sq = [{ lowest: 20, numForSale: 2 }, { lowest: 9, numForSale: 3 }];
+    let j = 0;
+    const client2 = {
+      async getMarketplaceStats() { const v = sq[Math.min(j++, sq.length - 1)]; return { lowestPrice: v.lowest, numForSale: v.numForSale, currency: 'EUR' }; },
+      async getPriceSuggestions() { return { 'Very Good Plus (VG+)': { value: 30, currency: 'EUR' }, 'Very Good (VG)': { value: 18, currency: 'EUR' } }; },
+    };
+    const rel2 = { releaseId: 777, title: 'Diamond', artist: 'Rare', year: 1983 };
+    const deps2 = { client: client2, store, engine, config };
+    assert.strictEqual(await processRelease(rel2, deps2), null, 'obs1: not warmed (no prior obs, not fresh) -> no fire');
+    const gem = await processRelease(rel2, deps2);
+    assert.ok(gem, 'obs2: a just-listed copy fires on the light warm-up');
+    assert.strictEqual(gem.referenceSource, 'sold-median', 'the primed REAL median is the reference, not the VG+ suggestion');
+    assert.strictEqual(gem.reference, 50, 'reference is the committed sold-median (50), not the suggestion (30)');
+    assert.strictEqual(gem.soldMedian, 50, 'deal carries the sold-median for the email/dashboard');
+    assert.ok(gem.freshListing, 'tagged as just-listed');
 
     fs.rmSync(tmp, { recursive: true, force: true });
     console.log('watcher itest: all assertions passed');

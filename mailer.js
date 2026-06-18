@@ -17,6 +17,7 @@ const pct = (d) => (d == null ? '—' : `${Math.round(d * 100)}%`);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 const REF_LABEL = {
+  'sold-median': 'real sold price',
   suggestion: 'VG+ suggested price',
   'trailing-median': 'its usual lowest price',
 };
@@ -24,8 +25,15 @@ const REF_LABEL = {
 function dealLine(d) {
   const ref = `${fmtPrice(d.reference, d.currency)} (${REF_LABEL[d.referenceSource] || 'reference'})`;
   const flags = [];
-  if (d.suspicious) flags.push('⚠ may be below VG+ — verify condition');
-  if (typeof d.confidence === 'number') flags.push(`confidence ${d.confidence}/2`);
+  // 🆕 just listed is the highest-value live signal — a copy that appeared since the last sweep — so
+  // it leads. When the reference is the REAL sold price the deal is high-trust; against the VG+
+  // suggestion it's an estimate to verify on the page.
+  if (d.freshListing) flags.push('🆕 just listed');
+  if (d.referenceSource !== 'sold-median') flags.push('≈ value is Discogs’ estimate — confirm on the page');
+  // The cloud (API-only) path can't see condition, so the only honest condition signal is the
+  // price-proxy "suspiciously low" flag. (The 0/2–2/2 "confidence" number was just reference
+  // agreement, not condition, and read as meaningless — dropped.)
+  if (d.suspicious) flags.push('⚠ may be below VG+ — verify condition on the page');
   return { ref, flags, title: `${d.artist ? d.artist + ' – ' : ''}${d.title || 'release ' + d.releaseId}` };
 }
 
@@ -166,14 +174,22 @@ module.exports = { makeMailer, renderDealsEmail, buildResendPayload, fmtPrice };
 if (require.main === module && process.argv.includes('--selftest')) {
   const assert = require('assert');
   const m = renderDealsEmail([
-    { releaseId: 1, artist: 'Imagination', title: 'Night Dubbing', lowest: 8, currency: 'EUR', reference: 30, referenceSource: 'suggestion', discount: 0.73, numForSale: 12, confidence: 2, suspicious: false, url: 'https://www.discogs.com/sell/release/1?sort=price%2Casc' },
-    { releaseId: 2, artist: 'Klein & MBO', title: 'Dirty Talk', lowest: 4, currency: 'EUR', reference: 25, referenceSource: 'trailing-median', discount: 0.84, numForSale: 3, confidence: 1, suspicious: true, url: 'https://www.discogs.com/sell/release/2?sort=price%2Casc' },
+    { releaseId: 1, artist: 'Imagination', title: 'Night Dubbing', lowest: 8, currency: 'EUR', reference: 30, referenceSource: 'sold-median', discount: 0.73, numForSale: 12, freshListing: true, suspicious: false, url: 'https://www.discogs.com/sell/release/1?sort=price%2Casc' },
+    { releaseId: 2, artist: 'Klein & MBO', title: 'Dirty Talk', lowest: 4, currency: 'EUR', reference: 25, referenceSource: 'trailing-median', discount: 0.84, numForSale: 3, suspicious: true, url: 'https://www.discogs.com/sell/release/2?sort=price%2Casc' },
   ]);
   assert.ok(/2 Discogs deals/.test(m.subject), 'subject counts deals');
   assert.ok(/Imagination/.test(m.html) && /Dirty Talk/.test(m.html), 'both deals rendered');
   assert.ok(/may be below VG\+/.test(m.html), 'suspicious flag shown');
+  assert.ok(/just listed/.test(m.html), 'fresh-listing flag shown (the live signal)');
+  assert.ok(/real sold price/.test(m.html), 'a sold-median deal is labelled "real sold price"');
+  assert.ok(/estimate/.test(m.text), 'a non-sold-median deal warns the value is an estimate');
   assert.ok(/€8\.00/.test(m.html) && /€4\.00/.test(m.html), 'prices formatted');
   assert.ok(m.text.includes('Buy: https://www.discogs.com/sell/release/1'), 'text has buy link');
+
+  // A deal judged against the REAL sold price is high-trust: no "estimate, confirm" caveat.
+  const trusted = renderDealsEmail([{ releaseId: 9, artist: 'A', title: 'B', lowest: 10, currency: 'EUR', reference: 40, referenceSource: 'sold-median', discount: 0.75, numForSale: 2, url: 'https://x' }]);
+  assert.ok(!/estimate/.test(trusted.text), 'a sold-median (real) deal omits the estimate caveat');
+  assert.ok(/real sold price/.test(trusted.text), 'and is labelled against the real sold price');
 
   // disabled mailer (no creds)
   assert.strictEqual(makeMailer({}).enabled, false);
