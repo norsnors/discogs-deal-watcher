@@ -309,10 +309,18 @@ function onScanProgress(m) {
     $('scan-text').textContent = `Confirming condition ${m.checked}/${total} · ${m.found} VG+ deal${m.found === 1 ? '' : 's'}`;
     return;
   }
+  if (m.phase === 'pushing') { $('scan-text').textContent = 'Saving sold-medians to GitHub for the email watcher…'; return; }
   if (m.phase === 'done') {
     $('scan-fill').style.width = '100%';
     const dropped = m.droppedNoVgPlus ? ` · ${m.droppedNoVgPlus} skipped (no VG+ copy)` : '';
-    $('scan-text').textContent = `Done — ${m.found} VG+ deal${m.found === 1 ? '' : 's'}${dropped}${m.aborted ? ' (stopped early)' : ''}.`;
+    // Surface the auto-push outcome so the user knows the cloud emails were updated (or why not).
+    let push = '';
+    if (m.mediansPush) {
+      if (m.mediansPush.pushed) push = ' · medians pushed to GitHub ✓';
+      else if (m.mediansPush.ok) push = ' · medians already up to date';
+      else push = ` · ⚠ medians push failed (${m.mediansPush.reason || 'git error'}) — commit manually`;
+    }
+    $('scan-text').textContent = `Done — ${m.found} VG+ deal${m.found === 1 ? '' : 's'}${dropped}${m.aborted ? ' (stopped early)' : ''}.${push}`;
     return;
   }
   const total = m.total || 1;

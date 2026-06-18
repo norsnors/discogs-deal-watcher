@@ -18,6 +18,7 @@
 const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { execFile } = require('child_process');
 
 // The watcher project lives one level up (this dashboard is a sibling Electron app).
 const WATCHER_DIR = path.join(__dirname, '..');
@@ -31,6 +32,7 @@ const DEFAULT_SETTINGS = {
   githubToken: '',
   apiBase: 'http://localhost:8787',
   token: '',
+  autoPushMedians: true, // after a scan, auto commit+push soldmedians.json so the cloud emails use it
 };
 
 function readSettings() {
@@ -45,6 +47,37 @@ function withTimeout(ms) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   return { signal: ctrl.signal, done: () => clearTimeout(t) };
+}
+
+// Run a git command in the watcher repo. Rejects on non-zero exit or timeout. Terminal prompts are
+// disabled so a missing credential fails fast instead of hanging the app waiting for input.
+function git(args, ms = 45_000) {
+  return new Promise((resolve, reject) => {
+    execFile('git', ['-C', WATCHER_DIR, ...args], { timeout: ms, windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } },
+      (err, stdout, stderr) => { if (err) { err.stderr = stderr; reject(err); } else resolve((stdout || '').trim()); });
+  });
+}
+
+// Auto-commit + push the refreshed soldmedians.json so the cloud email watcher picks it up with NO
+// manual git step (the whole point: "Scan now" is the only action). soldmedians.json is local-only and
+// the cloud bot's deals.json is remote-only, so the rebase pull that integrates the bot's commits never
+// conflicts. Fully best-effort: any failure is reported back, never thrown into the scan.
+async function autoPushSoldMedians() {
+  try {
+    await git(['add', 'soldmedians.json']);
+    // `diff --cached --quiet` exits 0 when nothing is staged (file unchanged) -> nothing to push.
+    try { await git(['diff', '--cached', '--quiet', '--', 'soldmedians.json']); return { ok: true, pushed: false, reason: 'unchanged' }; }
+    catch { /* non-zero exit = there IS a staged change -> continue committing */ }
+    await git(['commit', '-m', 'Auto: refresh sold-medians from dashboard scan']);
+    // Integrate the cloud bot's deals.json commits first, or the push is rejected (non-fast-forward).
+    await git(['pull', '--rebase', '--autostash', 'origin', 'main'], 90_000);
+    await git(['push', 'origin', 'main'], 60_000);
+    return { ok: true, pushed: true };
+  } catch (e) {
+    const msg = (e && (e.stderr || e.message)) ? String(e.stderr || e.message) : String(e);
+    const firstLine = msg.split('\n').map((l) => l.trim()).find(Boolean) || 'git failed';
+    return { ok: false, pushed: false, reason: firstLine.slice(0, 200) };
+  }
 }
 
 // Live-server mode (watcher.js on Fly/locally): token-protected /api/* endpoints.
@@ -414,7 +447,14 @@ async function runScrape(win) {
       }
     } catch { /* non-fatal: the export is a convenience for committing, not the scan result */ }
 
-    send({ phase: 'done', checked: total, total, found: deals.length, confirmed, droppedNoVgPlus, unconfirmed, soldMediansExported, aborted: scrapeAbort });
+    // Auto-commit + push the refreshed medians so the cloud emails use them with no manual git step.
+    let mediansPush = null;
+    if (soldMediansExported && readSettings().autoPushMedians !== false) {
+      send({ phase: 'pushing' });
+      mediansPush = await autoPushSoldMedians();
+    }
+
+    send({ phase: 'done', checked: total, total, found: deals.length, confirmed, droppedNoVgPlus, unconfirmed, soldMediansExported, mediansPush, aborted: scrapeAbort });
     return { deals, checked: total, total, confirmed, droppedNoVgPlus, unconfirmed, aborted: scrapeAbort };
   } finally {
     scrapeRunning = false;
