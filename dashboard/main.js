@@ -133,6 +133,63 @@ async function getStatus() {
 }
 
 // ---------------------------------------------------------------------------
+// Service health — "is the cloud watcher actually RUNNING right now?"
+// ---------------------------------------------------------------------------
+// getStatus()/getDeals() only confirm the SOURCE is reachable (the raw CDN can hand back a
+// deals.json that's days stale and look perfectly "connected"). This is the real heartbeat:
+//   • GitHub mode — query the Actions runs API for the last scheduled sweep: when it fired and
+//     whether it succeeded. A 'failure' conclusion is meaningful — watch-once.js exits non-zero
+//     precisely when the deal EMAIL fails to send (the product), so a red badge = "you've stopped
+//     getting deal mails". Works unauthenticated on the public repo (deals.json comes from the raw
+//     CDN, a different host, so this is the only api.github.com traffic — polled slowly to stay
+//     under the 60-req/hr unauthenticated limit).
+//   • Server mode — read the live /api/status sweep timestamp.
+async function githubHealth(s) {
+  const repo = (s.githubRepo || '').trim().replace(/^https?:\/\/github\.com\//, '').replace(/\/+$/, '');
+  if (!repo) throw new Error('No GitHub repo (owner/name) set — open Settings.');
+  const to = withTimeout(12_000);
+  try {
+    const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+    if (s.githubToken) headers.authorization = 'Bearer ' + s.githubToken;
+    const res = await fetch(`https://api.github.com/repos/${repo}/actions/runs?per_page=1`, { headers, signal: to.signal });
+    // 403/429 with no remaining budget = the unauthenticated rate limit, NOT a real outage — say so
+    // so the UI keeps the last-known state instead of falsely flipping to "down".
+    if (res.status === 403 || res.status === 429) {
+      const remaining = res.headers.get('x-ratelimit-remaining');
+      if (remaining === '0' || !s.githubToken) return { mode: 'github', repo, ok: false, rateLimited: true };
+    }
+    if (res.status === 404) return { mode: 'github', repo, ok: false, notFound: true };
+    if (res.status === 401) throw new Error('GitHub auth failed — check the access token in Settings.');
+    if (!res.ok) throw new Error('GitHub HTTP ' + res.status);
+    const j = await res.json();
+    const run = (j.workflow_runs || [])[0] || null;
+    if (!run) return { mode: 'github', repo, ok: true, run: null };
+    return {
+      mode: 'github', repo, ok: true,
+      run: {
+        startedAt: Date.parse(run.run_started_at || run.created_at) || null,
+        updatedAt: Date.parse(run.updated_at) || null,
+        status: run.status,         // queued | in_progress | completed
+        conclusion: run.conclusion, // success | failure | cancelled | null (while running)
+        url: run.html_url,
+        runNumber: run.run_number,
+        event: run.event,
+      },
+    };
+  } finally { to.done(); }
+}
+
+async function getServiceHealth() {
+  const s = readSettings();
+  if ((s.sourceType || 'github') === 'server') {
+    try { return { mode: 'server', ok: true, apiBase: s.apiBase, status: await serverGet(s, '/api/status') }; }
+    catch (e) { return { mode: 'server', ok: false, apiBase: s.apiBase, error: e.message }; }
+  }
+  try { return await githubHealth(s); }
+  catch (e) { return { mode: 'github', ok: false, repo: s.githubRepo, error: e.message }; }
+}
+
+// ---------------------------------------------------------------------------
 // "Scan now" — a full local sweep of the entire wantlist, on demand.
 // ---------------------------------------------------------------------------
 // Reuses the watcher's own pure modules (engine + discogs client + store) and your local
@@ -329,6 +386,10 @@ async function loadReleaseData(cfWin, releaseId, currency, opts = {}) {
     }
   }
 
+  // Warm-up path: the caller only wants the sold-median (coverage builder). Skip the sell page +
+  // listings entirely — that's the bulk of the per-release work and it's irrelevant here.
+  if (opts.soldOnly) return { cleared, sold, listings: null, listingsError: null, totalCount: null, shippingJoined: 0 };
+
   // Sell page: real per-copy shipping (DOM rows) AND, same-origin, the structured listings JSON.
   await cfWin.loadURL(SELL_PAGE_URL(releaseId, currency), { userAgent: DISCOGS_UA }).catch(() => {});
   const shipRes = await waitFor(cfWin, SHIP_EXTRACT, (x) => x && (x.rowCount > 0 || x.ready));
@@ -419,6 +480,10 @@ async function runScrape(win, opts = {}) {
     cfWin.loadURL('https://www.discogs.com/', { userAgent: DISCOGS_UA }).catch(() => {});
 
     const deals = [];
+    // Near-misses: candidates that LOOKED cheap (passed the Phase-1 prelim) but were rejected in
+    // confirmation — no VG+ copy, or a VG+ copy that isn't cheap enough. Surfaced (opt-in) in the
+    // dashboard with the reason, so "why isn't release X showing?" is answerable without a script.
+    const nearMisses = [];
     let priced = 0;          // candidates run through the browser (Phase 2)
     let candidateCount = 0;  // candidates discovered so far (Phase 1)
     let confirmed = 0;
@@ -441,8 +506,11 @@ async function runScrape(win, opts = {}) {
       await sleep(300); // be gentle on Discogs/Cloudflare between releases
 
       // Sold-median: prefer a fresh scrape, else the weekly cache. Refresh the cache when fresh.
+      // If the page cleared but the release has simply never sold, cache a null-median sentinel so the
+      // warm-up below doesn't keep re-scraping it every run (only when we don't already have a real one).
       let sold = cachedSold;
       if (data.sold && data.sold.median != null) { sold = data.sold; store.setSoldMedian(c.rel.releaseId, data.sold); }
+      else if (data.cleared && data.sold && (!cachedSold || cachedSold.median == null)) { store.setSoldMedian(c.rel.releaseId, { median: null, low: null, high: null, lastSold: data.sold.lastSold || 'Never', ts: Date.now() }); }
 
       const common = {
         id: `${c.rel.releaseId}-scan`,
@@ -458,7 +526,18 @@ async function runScrape(win, opts = {}) {
       if (Array.isArray(data.listings)) {
         // We have the real listings -> pick the cheapest copy that is actually VG+ or better.
         const pick = engine.selectByCondition(data.listings, { minCondition: 'Very Good Plus (VG+)' });
-        if (!pick.best) { droppedNoVgPlus++; return; }
+        if (!pick.best) {
+          droppedNoVgPlus++;
+          const ca = pick.cheapestAny;
+          nearMisses.push({
+            ...common, id: `${c.rel.releaseId}-miss`, nearMiss: true, reasonCode: 'no-vgplus',
+            currency: (ca && ca.currency) || c.stats.currency || config.currency,
+            cheapestPrice: ca ? (ca.price ?? null) : null, cheapestGrade: ca ? ca.media : null,
+            copiesSeen: pick.totalCount, vgPlusCount: pick.acceptableCount,
+            url: marketUrl(c.rel.releaseId),
+          });
+          return;
+        }
         const best = pick.best;
         const sig = engine.evaluateMarketSignal({
           lowest: best.price,
@@ -491,6 +570,16 @@ async function runScrape(win, opts = {}) {
           });
           confirmed++;
           if (best.shipping != null) realShip++;
+        } else {
+          // There IS a VG+ copy, it's just not cheap enough vs the reference (the JJ-Foster case).
+          nearMisses.push({
+            ...common, id: `${c.rel.releaseId}-miss`, nearMiss: true, reasonCode: 'vgplus-not-cheap',
+            currency: best.currency || c.stats.currency || config.currency,
+            bestPrice: best.price, bestGrade: best.media, shipping: best.shipping,
+            discount: sig.discount, effectiveDiscount: sig.effectiveDiscount,
+            reference: sig.reference, referenceSource: sig.referenceSource,
+            url: best.url || marketUrl(c.rel.releaseId),
+          });
         }
       } else {
         // Listings unreachable (Cloudflare didn't clear / API shape changed) -> fall back to the
@@ -514,6 +603,14 @@ async function runScrape(win, opts = {}) {
             url: marketUrl(c.rel.releaseId),
           });
           unconfirmed++;
+        } else {
+          nearMisses.push({
+            ...common, id: `${c.rel.releaseId}-miss`, nearMiss: true, reasonCode: 'unconfirmed-not-cheap',
+            currency: c.stats.currency || config.currency,
+            lowest: c.stats.lowestPrice, discount: sig.discount, effectiveDiscount: sig.effectiveDiscount,
+            reference: sig.reference, referenceSource: sig.referenceSource, impliedGrade: sig.impliedGrade,
+            url: marketUrl(c.rel.releaseId),
+          });
         }
       }
     }
@@ -580,8 +677,44 @@ async function runScrape(win, opts = {}) {
     if (wake) { wake(); wake = null; } // let the consumer finish draining the queue
     await consumer;
 
+    // --- Sold-median warm-up (coverage builder) -------------------------------------------------
+    // The candidate pipeline only scrapes a sold-median for releases that LOOKED cheap. Releases
+    // sitting at a normal price never get their true market value learned — so when one suddenly gets
+    // a just-listed cheap copy (the prime diamond event), the cloud has no real median and must judge
+    // it against the often-inflated VG+ suggestion (a missed diamond, or a false positive). To close
+    // that gap, each FULL scan tops up a bounded budget of not-yet-covered releases — regardless of
+    // current price — caching the real median (or a "never sold" sentinel so we don't re-try weekly).
+    // Over a few scans the whole wantlist gets a real reference. Quick scans skip this (they're for
+    // speed); the cf window + cf_clearance are already warm here, and it needs no API calls.
+    let warmedReal = 0, warmedChecked = 0;
+    const WARMUP_BUDGET = opts.quick ? 0 : (() => { const v = Number(readSettings().soldMedianWarmup); return Number.isFinite(v) ? v : 50; })();
+    if (WARMUP_BUDGET > 0 && !scrapeAbort) {
+      const fresh = (id) => { const sm = store.getSoldMedian(id); return !!(sm && sm.ts && (Date.now() - sm.ts < SOLD_TTL_MS)); };
+      const targets = work
+        .filter((rel) => !fresh(rel.releaseId))
+        .sort((a, b) => { const sa = store.getSoldMedian(a.releaseId), sb = store.getSoldMedian(b.releaseId); return (sa ? sa.ts : 0) - (sb ? sb.ts : 0); }) // never-cached first, then oldest
+        .slice(0, WARMUP_BUDGET);
+      for (let i = 0; i < targets.length; i++) {
+        if (scrapeAbort) break;
+        send({ phase: 'warmup', checked: i, total: targets.length, found: deals.length });
+        let d = { cleared: false, sold: null };
+        try { d = await loadReleaseData(cfWin, targets[i].releaseId, config.currency, { soldOnly: true }); } catch { /* transient — retry next scan */ }
+        if (d.sold && d.sold.median != null) { store.setSoldMedian(targets[i].releaseId, d.sold); warmedReal++; }
+        else if (d.cleared && d.sold) { store.setSoldMedian(targets[i].releaseId, { median: null, low: null, high: null, lastSold: d.sold.lastSold || 'Never', ts: Date.now() }); }
+        warmedChecked++;
+        await sleep(300);
+      }
+      send({ phase: 'warmup', checked: targets.length, total: targets.length, found: deals.length });
+    }
+
     deals.sort((a, b) => (b.discount ?? 0) - (a.discount ?? 0));
-    try { fs.writeFileSync(LAST_SCAN_FILE(), JSON.stringify({ ts: Date.now(), deals })); } catch { /* best effort */ }
+    // Near-misses: show the most USEFUL first — a confirmed VG+ copy that just missed the threshold
+    // (a real almost-deal) before the worn / no-VG+ ones — then by how close it came. Cap so a huge
+    // worn-copy tail can't bloat the result; the count is reported either way.
+    const missRank = (m) => (m.reasonCode === 'vgplus-not-cheap' ? 0 : m.reasonCode === 'unconfirmed-not-cheap' ? 1 : 2);
+    nearMisses.sort((a, b) => missRank(a) - missRank(b) || ((b.effectiveDiscount ?? b.discount ?? 0) - (a.effectiveDiscount ?? a.discount ?? 0)));
+    const nearMissOut = nearMisses.slice(0, 250);
+    try { fs.writeFileSync(LAST_SCAN_FILE(), JSON.stringify({ ts: Date.now(), deals, nearMisses: nearMissOut })); } catch { /* best effort */ }
 
     // Export the accumulated REAL sales-history medians to a committable root file so the cloud email
     // watcher can judge deals against true market value. The store keeps them in the gitignored
@@ -593,8 +726,12 @@ async function runScrape(win, opts = {}) {
       const src = path.join(WATCHER_DIR, 'state', 'soldmedians.json');
       if (fs.existsSync(src)) {
         const sm = JSON.parse(fs.readFileSync(src, 'utf8'));
-        soldMediansExported = sm && typeof sm === 'object' ? Object.keys(sm).length : 0;
-        if (soldMediansExported) fs.writeFileSync(path.join(WATCHER_DIR, 'soldmedians.json'), JSON.stringify(sm));
+        // Commit only REAL medians — drop the "never sold" sentinels (median null) the warm-up keeps
+        // locally to avoid re-scraping; the cloud only wants true market references.
+        const real = {};
+        if (sm && typeof sm === 'object') for (const [id, v] of Object.entries(sm)) if (v && v.median != null) real[id] = v;
+        soldMediansExported = Object.keys(real).length;
+        if (soldMediansExported) fs.writeFileSync(path.join(WATCHER_DIR, 'soldmedians.json'), JSON.stringify(real));
       }
     } catch { /* non-fatal: the export is a convenience for committing, not the scan result */ }
 
@@ -605,8 +742,8 @@ async function runScrape(win, opts = {}) {
       mediansPush = await autoPushSoldMedians();
     }
 
-    send({ phase: 'done', checked: total, total, found: deals.length, confirmed, droppedNoVgPlus, unconfirmed, realShip, soldMediansExported, mediansPush, aborted: scrapeAbort, quick: !!opts.quick, wantlistTotal });
-    return { deals, checked: total, total, confirmed, droppedNoVgPlus, unconfirmed, realShip, aborted: scrapeAbort, quick: !!opts.quick, wantlistTotal };
+    send({ phase: 'done', checked: total, total, found: deals.length, confirmed, droppedNoVgPlus, unconfirmed, realShip, nearMisses: nearMissOut.length, warmedReal, warmedChecked, soldMediansExported, mediansPush, aborted: scrapeAbort, quick: !!opts.quick, wantlistTotal });
+    return { deals, nearMisses: nearMissOut, checked: total, total, confirmed, droppedNoVgPlus, unconfirmed, realShip, warmedReal, warmedChecked, aborted: scrapeAbort, quick: !!opts.quick, wantlistTotal };
   } finally {
     scrapeRunning = false;
     if (cfWin) { try { cfWin.destroy(); } catch { /* already gone */ } }
@@ -621,6 +758,7 @@ ipcMain.handle('settings:get', () => readSettings());
 ipcMain.handle('settings:set', (_e, s) => { writeSettings(s); return true; });
 ipcMain.handle('deals:get', (_e, limit) => getDeals(limit));
 ipcMain.handle('status:get', () => getStatus());
+ipcMain.handle('health:get', () => getServiceHealth());
 ipcMain.handle('open:external', (_e, url) => { if (/^https?:\/\//.test(url)) shell.openExternal(url); });
 ipcMain.handle('scrape:run', (e, opts) => runScrape(BrowserWindow.fromWebContents(e.sender), opts || {}));
 ipcMain.handle('scrape:cancel', () => { scrapeAbort = true; return true; });

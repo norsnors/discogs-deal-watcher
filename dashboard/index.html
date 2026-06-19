@@ -13,10 +13,13 @@
       <h1>Deal Watcher</h1>
     </div>
     <div class="status" id="status">
-      <span class="pill" id="pill-conn">connecting…</span>
+      <button class="svc idle" id="svc-badge" type="button" title="Service status — click to open on GitHub">
+        <span class="svc-dot" id="svc-dot"></span>
+        <span class="svc-label" id="svc-label">checking…</span>
+      </button>
+      <span class="pill" id="pill-sweep">—</span>
       <span class="pill" id="pill-wantlist">—</span>
       <span class="pill" id="pill-deals">—</span>
-      <span class="pill" id="pill-sweep">—</span>
     </div>
     <div class="actions">
       <button id="btn-scan" class="scan" title="Scan your WHOLE wantlist now for current bargains (~13 min)">⚡ Scan now</button>
@@ -63,6 +66,7 @@
     <label class="f checkbox" title="Only show copies confirmed VG+ or better (scan deals use the real listing grade; cloud deals fall back to a price estimate)"><input type="checkbox" id="vgPlusOnly" checked /> VG+ only</label>
     <label class="f checkbox"><input type="checkbox" id="freshOnly" /> Just listed</label>
     <label class="f checkbox" title="Reveal deals you've hidden with the × button"><input type="checkbox" id="showHidden" /> Show hidden</label>
+    <label class="f checkbox" title="Show releases that looked cheap but didn't qualify, with the reason why (local scan only)"><input type="checkbox" id="showNearMiss" /> Show near-misses</label>
     <span class="spacer"></span>
     <span class="count" id="resultCount"></span>
   </section>

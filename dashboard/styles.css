@@ -43,8 +43,34 @@ body {
   background: #11161d; border: 1px solid var(--line);
   padding: 4px 10px; border-radius: 999px; white-space: nowrap;
 }
-.pill.ok { color: var(--green); border-color: #1f5135; }
-.pill.bad { color: var(--red); border-color: #5b2b2b; }
+
+/* Live-service badge: the heartbeat of the cloud watcher. A colored, gently breathing dot tells you
+   at a glance whether the email/sweep service is actually running. Click-through opens the source
+   (GitHub Actions run / server). State classes: live | delayed | fail | down | scan | idle. */
+.svc {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-family: inherit; font-size: 12px; font-weight: 700; letter-spacing: .3px;
+  color: var(--muted); background: #11161d; border: 1px solid var(--line);
+  padding: 4px 11px 4px 9px; border-radius: 999px; white-space: nowrap; cursor: pointer;
+}
+.svc:hover { background: #1c2531; }
+.svc-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+
+.svc.live   { color: var(--green); border-color: #1f5135; }
+.svc.live   .svc-dot { background: var(--green); animation: svc-pulse 2.2s ease-out infinite; }
+.svc.delayed { color: var(--amber); border-color: #5a4a17; }
+.svc.delayed .svc-dot { background: var(--amber); }
+.svc.fail, .svc.down { color: var(--red); border-color: #5b2b2b; }
+.svc.fail .svc-dot, .svc.down .svc-dot { background: var(--red); }
+.svc.fail   .svc-dot { animation: svc-pulse-red 1.4s ease-out infinite; }
+.svc.scan   { color: var(--accent); border-color: #2c3f63; }
+.svc.scan   .svc-dot { background: var(--accent); animation: svc-pulse-blue 1.2s ease-out infinite; }
+.svc.idle   { color: var(--muted); }
+
+@keyframes svc-pulse      { 0% { box-shadow: 0 0 0 0 #2ecc7188; } 70% { box-shadow: 0 0 0 6px #2ecc7100; } 100% { box-shadow: 0 0 0 0 #2ecc7100; } }
+@keyframes svc-pulse-blue { 0% { box-shadow: 0 0 0 0 #5b8def88; } 70% { box-shadow: 0 0 0 6px #5b8def00; } 100% { box-shadow: 0 0 0 0 #5b8def00; } }
+@keyframes svc-pulse-red  { 0% { box-shadow: 0 0 0 0 #ff5d5d88; } 70% { box-shadow: 0 0 0 6px #ff5d5d00; } 100% { box-shadow: 0 0 0 0 #ff5d5d00; } }
+@media (prefers-reduced-motion: reduce) { .svc-dot { animation: none !important; } }
 .actions { display: flex; align-items: center; gap: 8px; }
 .actions button {
   background: #11161d; color: var(--text); border: 1px solid var(--line);
@@ -155,6 +181,20 @@ input[type="range"] { accent-color: var(--accent); }
 .card .dismiss:hover { opacity: 1; background: #ffffff14; color: var(--text); }
 .card .dismiss.restore { color: var(--accent); opacity: .85; font-size: 14px; }
 .card.is-hidden { opacity: .55; }
+
+/* Near-misses: a divider spanning the grid, then dimmed dashed cards explaining why each release
+   looked cheap but didn't qualify. Opt-in via "Show near-misses"; scan-only. */
+.deals .nearmiss-head {
+  grid-column: 1 / -1;
+  color: var(--muted); font-size: 12px; font-weight: 650; letter-spacing: .2px;
+  border-top: 1px dashed var(--line); padding-top: 14px; margin-top: 2px;
+}
+.card.is-nearmiss { opacity: .68; border-style: dashed; }
+.card.is-nearmiss:hover { opacity: 1; }
+.card .why { color: var(--text); font-size: 12px; line-height: 1.45; margin-top: 6px; }
+.card .why b { color: var(--amber); font-weight: 700; }
+.card .buy.ghostbuy { background: transparent; border: 1px solid var(--line); color: var(--text); margin-top: 10px; }
+.card .buy.ghostbuy:hover { background: #1c2531; }
 
 .empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--muted); padding: 40px; text-align: center; }
 .hidden { display: none !important; }

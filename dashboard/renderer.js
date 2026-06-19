@@ -26,6 +26,7 @@ const DEMO = [
 ];
 
 let allDeals = [];
+let allNearMisses = [];   // releases that looked cheap but didn't qualify (scan only) — see "Show near-misses"
 let seenIds = new Set();
 let firstLoad = true;
 let viewMode = 'cloud';   // 'cloud' | 'scan'
@@ -208,6 +209,51 @@ function card(d) {
   </article>`;
 }
 
+// --- Near-misses -----------------------------------------------------------
+// A release that LOOKED cheap (passed the scan's Phase-1 prelim) but was rejected in confirmation.
+// Opt-in (the "Show near-misses" box) and scan-only — it answers "why isn't release X showing?".
+function nearMissReason(d) {
+  const ref = d.reference != null ? `${money(d.reference, d.currency)} ${REF_LABEL[d.referenceSource] || 'ref'}` : 'its reference';
+  if (d.reasonCode === 'no-vgplus') {
+    const cheap = d.cheapestPrice != null ? money(d.cheapestPrice, d.currency) : 'the cheapest copy';
+    const g = d.cheapestGrade ? ` (${esc(gradeShort(d.cheapestGrade))})` : '';
+    const seen = d.copiesSeen ? ` ${d.copiesSeen} copies for sale, none VG+.` : '';
+    return `No VG+ copy for sale — cheapest is ${cheap}${g}, below VG+.${seen}`;
+  }
+  if (d.reasonCode === 'vgplus-not-cheap') {
+    const ship = d.shipping != null && d.shipping > 0 ? ` + ${money(d.shipping, d.currency)} ship` : '';
+    return `Cheapest VG+ copy is ${money(d.bestPrice, d.currency)}${ship} = <b>${pct(d.effectiveDiscount)} off</b> vs ${ref} — under the 40% scan threshold.`;
+  }
+  if (d.reasonCode === 'unconfirmed-not-cheap') {
+    return `Couldn't read condition. Cheapest ${money(d.lowest, d.currency)} ≈ <b>${pct(d.discount)} off</b> vs ${ref} — under 40%.`;
+  }
+  return 'Looked cheap but didn’t qualify.';
+}
+
+function nearMissCard(d) {
+  const thumb = d.thumb
+    ? `<img class="thumb" src="${esc(d.thumb)}" alt="" referrerpolicy="no-referrer" />`
+    : `<div class="thumb"></div>`;
+  return `<article class="card is-nearmiss">
+    <span class="when">missed</span>
+    ${thumb}
+    <div class="body">
+      <p class="title">${esc(d.title || 'Release ' + d.releaseId)}</p>
+      <p class="artist">${esc(d.artist || '')}</p>
+      <div class="why">${nearMissReason(d)}</div>
+      <button class="buy ghostbuy" data-url="${esc(d.url || d.releaseUrl)}">View on Discogs &rarr;</button>
+    </div>
+  </article>`;
+}
+
+// Near-misses ignore the deal sliders (they explicitly DIDN'T qualify) — only the search box applies,
+// so you can look one up by name.
+function filterNearMisses(list) {
+  const q = $('search').value.trim().toLowerCase();
+  if (!q) return list;
+  return list.filter((d) => `${d.artist || ''} ${d.title || ''}`.toLowerCase().includes(q));
+}
+
 function applyFilters(deals) {
   const q = $('search').value.trim().toLowerCase();
   const minV = parseFloat($('minValue').value) || 0;
@@ -245,12 +291,16 @@ function render() {
   const enriched = allDeals.map(enrich);
   let deals = applyFilters(enriched);
   deals = sortDeals(deals, $('sortBy').value);
+  // Near-misses: opt-in, scan-only. Rendered below the deals with the reason each didn't qualify.
+  const showMiss = $('showNearMiss').checked && viewMode === 'scan' && allNearMisses.length > 0;
+  const misses = showMiss ? filterNearMisses(allNearMisses) : [];
   const wrap = $('deals');
   const empty = $('empty');
   const hiddenCount = allDeals.reduce((acc, d) => acc + (dismissed.has(String(d.releaseId)) ? 1 : 0), 0);
   const hiddenNote = hiddenCount ? ` · ${hiddenCount} hidden` : '';
+  $('pill-deals').textContent = `${allDeals.length} deal${allDeals.length === 1 ? '' : 's'}`;
   $('resultCount').textContent = deals.length ? `${deals.length} of ${allDeals.length}${hiddenNote}${viewMode === 'scan' ? ' · live scan' : ''}` : '';
-  if (!deals.length) {
+  if (!deals.length && !misses.length) {
     wrap.innerHTML = '';
     empty.classList.remove('hidden');
     empty.textContent = allDeals.length ? 'No deals match your filters — loosen the sliders or untick “VG+ only”.'
@@ -259,7 +309,12 @@ function render() {
     return;
   }
   empty.classList.add('hidden');
-  wrap.innerHTML = deals.map(card).join('');
+  let html = deals.map(card).join('');
+  if (misses.length) {
+    html += `<div class="nearmiss-head">↓ Near-misses — looked cheap but didn’t qualify (${misses.length})</div>`;
+    html += misses.map(nearMissCard).join('');
+  }
+  wrap.innerHTML = html;
   wrap.querySelectorAll('.buy').forEach((b) => b.addEventListener('click', () => openUrl(b.getAttribute('data-url'))));
   wrap.querySelectorAll('.altlink').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); openUrl(a.getAttribute('data-url')); }));
   wrap.querySelectorAll('.dismiss').forEach((b) => b.addEventListener('click', () => {
@@ -270,15 +325,89 @@ function render() {
   }));
 }
 
-function setStatus(ok, statusObj) {
-  const conn = $('pill-conn');
-  conn.textContent = viewMode === 'scan' ? 'local scan' : (ok ? 'connected' : 'offline');
-  conn.className = 'pill ' + (viewMode === 'scan' ? 'ok' : (ok ? 'ok' : 'bad'));
-  if (statusObj) {
-    $('pill-wantlist').textContent = `wantlist ${statusObj.wantlistSize ?? '—'}`;
-    $('pill-deals').textContent = `${statusObj.dealsStored ?? allDeals.length} deals`;
-    $('pill-sweep').textContent = statusObj.lastSweepAt ? `last sweep ${ago(statusObj.lastSweepAt)}` : (statusObj.sweepCount != null ? `sweep #${statusObj.sweepCount}` : 'cloud');
+// Supporting pills only (wantlist size). Connectivity + freshness now live in the service badge.
+function setStatus(statusObj) {
+  if (!statusObj) return;
+  $('pill-wantlist').textContent = `wantlist ${statusObj.wantlistSize ?? '—'}`;
+}
+
+// --- Live-service badge ---------------------------------------------------
+// Turns the health object from main into a colored, pulsing "is the watcher running?" indicator.
+// This is the thing the user watches to know the email/sweep service is alive — not just that the
+// deals source happens to be reachable.
+let lastHealth = null;
+let lastGithubRun = null; // remembered so a transient GitHub rate-limit doesn't blank the badge
+
+function setServiceBadge(h) {
+  const badge = $('svc-badge'), label = $('svc-label'), sweep = $('pill-sweep');
+  let state = 'idle', text = 'checking…', sub = '', title = 'Service status', url = null;
+
+  if (scanning) {
+    state = 'scan'; text = 'Scanning…'; title = 'A local scan is running right now.';
+  } else if (!h || h.mode === 'demo') {
+    state = 'idle'; text = h ? 'demo' : 'checking…';
+    title = h ? 'Preview mode — no live service connection.' : 'Checking the service…';
+  } else if (h.mode === 'server') {
+    if (!h.ok) { state = 'down'; text = 'Offline'; title = 'Cannot reach the watcher server: ' + (h.error || 'unknown'); }
+    else {
+      const last = h.status && h.status.lastSweepAt;
+      const ageM = last ? (Date.now() - last) / 60000 : 0; // reachable but no sweep yet = freshly up, treat as live
+      state = ageM < 30 ? 'live' : (ageM < 120 ? 'delayed' : 'down');
+      text = state === 'live' ? 'Live' : (state === 'delayed' ? 'Idle' : 'Stale');
+      sub = last ? `swept ${ago(last)}` : 'connected';
+      title = `Watcher server reachable${last ? ` · last sweep ${ago(last)}` : ''}.`;
+    }
+  } else { // github
+    const run = (h.ok && h.run) ? h.run : (h.rateLimited ? lastGithubRun : null);
+    if (!run) {
+      if (h.rateLimited) { state = 'idle'; text = 'checking…'; title = 'GitHub status check is rate-limited; retrying shortly. (The cron itself is unaffected.)'; }
+      else if (h.notFound) { state = 'down'; text = 'No runs'; title = 'No workflow runs found for this repo yet.'; }
+      else if (!h.ok) { state = 'down'; text = 'Unknown'; title = 'Cannot reach GitHub to check the service: ' + (h.error || 'unknown'); }
+      else { state = 'down'; text = 'Never run'; title = 'The scheduled workflow has not run yet.'; }
+    } else {
+      const when = run.startedAt || run.updatedAt;
+      const ageM = when ? (Date.now() - when) / 60000 : Infinity;
+      const running = run.status && run.status !== 'completed';
+      const failed = run.conclusion === 'failure';
+      const concl = running ? 'in progress' : (run.conclusion || 'unknown');
+      // GitHub deprioritizes scheduled runs on public repos and often delays/skips ticks, so the
+      // bands are forgiving: amber "Delayed" (not red) absorbs the normal hiccups, and only a long
+      // silence (>90 min ≈ 6 missed ticks) goes red. A FAILED run is always red — that's the case
+      // that actually stops the deal emails.
+      if (running && ageM < 45) { state = 'live'; text = 'Running now'; }
+      else if (failed && ageM < 120) { state = 'fail'; text = 'Run failed'; }
+      else if (ageM < 30) { state = 'live'; text = 'Live'; }
+      else if (ageM < 90) { state = 'delayed'; text = 'Delayed'; }
+      else { state = 'down'; text = 'Down'; }
+      sub = when ? `ran ${ago(when)}` : '';
+      if (h.rateLimited) sub = sub ? sub + ' · rechecking' : 'rechecking';
+      title = state === 'fail'
+        ? `Last scheduled run FAILED (${ago(when)}) — deal emails may not be sending. Click to inspect on GitHub.`
+        : state === 'delayed'
+          ? `Last run ${ago(when)} (${concl}). GitHub sometimes delays scheduled runs under load — usually self-corrects. Click to open Actions.`
+          : state === 'down'
+            ? `No scheduled run in over 90 minutes (last ${when ? ago(when) : 'never'}). The cron may be paused or broken — click to check GitHub Actions.`
+            : `Live — sweeps every ~15 min. Last run ${ago(when)} (${concl}). Click to open Actions.`;
+      url = run.url;
+    }
+    if (!url && h.repo) url = `https://github.com/${h.repo}/actions`;
   }
+
+  badge.className = 'svc ' + state;
+  label.textContent = text;
+  badge.title = title;
+  badge.dataset.url = url || '';
+  if (sweep) sweep.textContent = sub;
+}
+
+async function refreshHealth() {
+  if (scanning) { setServiceBadge(lastHealth); return; } // the scan owns the badge while it runs
+  if (!hasApi) { setServiceBadge({ mode: 'demo' }); return; }
+  let h = null;
+  try { h = await window.api.getHealth(); } catch { h = null; }
+  if (h && h.mode === 'github' && h.ok && h.run) lastGithubRun = h.run;
+  lastHealth = h;
+  setServiceBadge(h);
 }
 
 function notifyNew(deals) {
@@ -298,12 +427,13 @@ function notifyNew(deals) {
 
 async function refresh() {
   if (viewMode === 'scan') return; // don't clobber live scan results
+  allNearMisses = []; // cloud deals.json carries no near-misses — they exist only in a local scan
   if (!hasApi) {
     try {
       const r = await fetch('deals.json', { cache: 'no-store' });
       allDeals = r.ok ? await r.json() : DEMO;
     } catch { allDeals = DEMO; }
-    setStatus(true, { wantlistSize: '—', dealsStored: allDeals.length });
+    setStatus({ wantlistSize: '—' });
     render();
     return;
   }
@@ -311,10 +441,10 @@ async function refresh() {
     const [deals, status] = await Promise.all([window.api.getDeals(200), window.api.getStatus().catch(() => null)]);
     allDeals = Array.isArray(deals) ? deals : [];
     notifyNew(allDeals);
-    setStatus(true, status || {});
+    setStatus(status || {});
     render();
   } catch (e) {
-    setStatus(false);
+    refreshHealth(); // let the badge show the authoritative service state (down/rate-limited/etc.)
     $('empty').classList.remove('hidden');
     $('empty').textContent = 'Cannot reach the watcher: ' + e.message + '  — or just hit ⚡ Scan now.';
     $('deals').innerHTML = '';
@@ -334,6 +464,8 @@ function setScanUI(on) {
   $('btn-scan').disabled = on;
   $('btn-quickscan').disabled = on;
   $('btn-scan').textContent = on ? '⏳ Scanning…' : '⚡ Scan now';
+  // While a scan runs the badge says "Scanning…"; once it ends, re-check the real service state.
+  if (on) setServiceBadge(lastHealth); else refreshHealth();
 }
 
 async function startScan(opts = {}) {
@@ -346,8 +478,9 @@ async function startScan(opts = {}) {
     const res = await window.api.scrapeRun(opts);
     viewMode = 'scan';
     allDeals = (res && res.deals) || [];
+    allNearMisses = (res && res.nearMisses) || [];
     seenIds = new Set(allDeals.map((d) => d.id));
-    setStatus(true, { wantlistSize: res ? (res.wantlistTotal ?? res.total) : '—', dealsStored: allDeals.length });
+    setStatus({ wantlistSize: res ? (res.wantlistTotal ?? res.total) : '—' });
     render();
   } catch (e) {
     $('empty').classList.remove('hidden');
@@ -381,6 +514,11 @@ function onScanProgress(m) {
     $('scan-text').textContent = `Confirming condition ${m.checked}/${total} · ${m.found} VG+ deal${m.found === 1 ? '' : 's'}`;
     return;
   }
+  if (m.phase === 'warmup') {
+    $('scan-fill').style.width = '100%';
+    $('scan-text').textContent = `Building sold-median coverage ${m.checked}/${m.total}… (so cloud emails judge against real market value)`;
+    return;
+  }
   if (m.phase === 'pushing') { $('scan-text').textContent = 'Saving sold-medians to GitHub for the email watcher…'; return; }
   if (m.phase === 'done') {
     $('scan-fill').style.width = '100%';
@@ -394,7 +532,9 @@ function onScanProgress(m) {
     }
     const ship = m.realShip != null && m.found ? ` · ${m.realShip}/${m.found} with real shipping` : '';
     const cov = m.quick ? ` · quick scan (top ${m.total} of ${m.wantlistTotal})` : '';
-    $('scan-text').textContent = `Done — ${m.found} VG+ deal${m.found === 1 ? '' : 's'}${ship}${dropped}${cov}${m.aborted ? ' (stopped early)' : ''}.${push}`;
+    const miss = m.nearMisses ? ` · ${m.nearMisses} near-miss${m.nearMisses === 1 ? '' : 'es'} (tick “Show near-misses”)` : '';
+    const warm = m.warmedReal ? ` · ${m.warmedReal} new sold-median${m.warmedReal === 1 ? '' : 's'} learned` : '';
+    $('scan-text').textContent = `Done — ${m.found} VG+ deal${m.found === 1 ? '' : 's'}${ship}${dropped}${cov}${m.aborted ? ' (stopped early)' : ''}.${push}${warm}${miss}`;
     return;
   }
   // 'scan' phase: the API sweep and the browser confirmation run concurrently now, so one message
@@ -456,7 +596,9 @@ async function saveSettings() {
   await persistSettings();
   closeSettings();
   viewMode = 'cloud'; firstLoad = true; seenIds = new Set();
+  lastGithubRun = null; // source may have changed (server <-> github) — don't carry a stale run
   refresh();
+  refreshHealth();
 }
 
 async function testConnection() {
@@ -481,8 +623,9 @@ window.addEventListener('DOMContentLoaded', () => {
   $('btn-scan').addEventListener('click', () => startScan());
   $('btn-quickscan').addEventListener('click', () => startScan({ quick: true }));
   $('btn-scan-cancel').addEventListener('click', () => { if (hasApi) window.api.scrapeCancel(); $('scan-text').textContent = 'Stopping…'; });
-  $('btn-refresh').addEventListener('click', () => { viewMode = 'cloud'; refresh(); });
+  $('btn-refresh').addEventListener('click', () => { viewMode = 'cloud'; refresh(); refreshHealth(); });
   $('btn-settings').addEventListener('click', openSettings);
+  $('svc-badge').addEventListener('click', () => { const u = $('svc-badge').dataset.url; if (u) openUrl(u); });
   $('set-cancel').addEventListener('click', closeSettings);
   $('set-save').addEventListener('click', saveSettings);
   $('set-test-btn').addEventListener('click', testConnection);
@@ -493,6 +636,7 @@ window.addEventListener('DOMContentLoaded', () => {
   $('freshOnly').addEventListener('change', render);
   $('vgPlusOnly').addEventListener('change', render);
   $('showHidden').addEventListener('change', render);
+  $('showNearMiss').addEventListener('change', render);
   $('minValue').addEventListener('input', () => { const v = parseInt($('minValue').value, 10); $('minValueVal').textContent = v > 0 ? `€${v}+` : 'any'; render(); });
   $('minDiscount').addEventListener('input', () => { $('minDiscountVal').textContent = $('minDiscount').value + '%'; render(); });
   $('maxTotal').addEventListener('input', () => { const v = parseInt($('maxTotal').value, 10); $('maxTotalVal').textContent = v > 0 ? `€${v}` : 'any'; render(); });
@@ -502,8 +646,13 @@ window.addEventListener('DOMContentLoaded', () => {
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
 
   refresh();
+  refreshHealth();                // light up the live-service badge on first paint
   if (hasApi) {
     setInterval(refresh, 30_000); // poll the cloud every 30s (paused during a local scan)
+    // Check the real service heartbeat every 2 min. Slow on purpose: the cron only fires every
+    // ~15 min, and this is the only api.github.com traffic (deals come from the raw CDN), so 30
+    // req/hr stays well under the 60/hr unauthenticated limit.
+    setInterval(refreshHealth, 120_000);
     maybeAutoScan();              // auto-scan on launch if the last scan is stale (keeps emails sharp)
     setInterval(maybeAutoScan, 60 * 60_000); // re-check hourly while the app stays open
   }

@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('api', {
   saveSettings: (s) => ipcRenderer.invoke('settings:set', s),
   getDeals: (limit) => ipcRenderer.invoke('deals:get', limit),
   getStatus: () => ipcRenderer.invoke('status:get'),
+  getHealth: () => ipcRenderer.invoke('health:get'),
   openExternal: (url) => ipcRenderer.invoke('open:external', url),
   // Local scan: full sweep, or a prioritized quick scan ({ quick: true }).
   scrapeRun: (opts) => ipcRenderer.invoke('scrape:run', opts),
