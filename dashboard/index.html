@@ -24,6 +24,7 @@
     <div class="actions">
       <button id="btn-scan" class="scan" title="Scan your WHOLE wantlist now for current bargains (~13 min)">⚡ Scan now</button>
       <button id="btn-quickscan" class="scan ghost" title="Quick scan: only the highest-priority releases (~4–5 min). Misses quiet releases this run — they roll into the next scan.">⚡ Quick</button>
+      <button id="btn-fullscan" class="scan ghost" title="Deep refresh: full wantlist scan AND re-scrape EVERY sold-median, ignoring the weekly cache (not 50 at a time). Most thorough — guarantees every reference is current — but slow (~30–60 min). Cancellable.">⚡ Full + medians</button>
       <button id="btn-refresh" title="Refresh">↻</button>
       <button id="btn-settings" title="Settings">⚙</button>
     </div>
@@ -63,7 +64,7 @@
         <option value="newest">Newest</option>
       </select>
     </label>
-    <label class="f checkbox" title="Only show copies confirmed VG+ or better (scan deals use the real listing grade; cloud deals fall back to a price estimate)"><input type="checkbox" id="vgPlusOnly" checked /> VG+ only</label>
+    <label class="f checkbox" title="Only show copies that look VG+ or better. Scan deals use the REAL listing grade; cloud/email deals can't be condition-verified, so this hides ALL of them — leave it off to see what you were emailed."><input type="checkbox" id="vgPlusOnly" /> VG+ only</label>
     <label class="f checkbox"><input type="checkbox" id="freshOnly" /> Just listed</label>
     <label class="f checkbox" title="Reveal deals you've hidden with the × button"><input type="checkbox" id="showHidden" /> Show hidden</label>
     <label class="f checkbox" title="Show releases that looked cheap but didn't qualify, with the reason why (local scan only)"><input type="checkbox" id="showNearMiss" /> Show near-misses</label>

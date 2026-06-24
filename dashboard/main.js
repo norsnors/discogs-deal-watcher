@@ -484,6 +484,7 @@ async function runScrape(win, opts = {}) {
     // confirmation — no VG+ copy, or a VG+ copy that isn't cheap enough. Surfaced (opt-in) in the
     // dashboard with the reason, so "why isn't release X showing?" is answerable without a script.
     const nearMisses = [];
+    const scrapedThisRun = new Set(); // releases whose median we (re)scraped this run — lets a full-median refresh skip them in the warm-up (no double scrape)
     let priced = 0;          // candidates run through the browser (Phase 2)
     let candidateCount = 0;  // candidates discovered so far (Phase 1)
     let confirmed = 0;
@@ -499,7 +500,9 @@ async function runScrape(win, opts = {}) {
     // copy we've CONFIRMED is VG+, not a price guess.
     async function confirmCandidate(c) {
       const cachedSold = store.getSoldMedian(c.rel.releaseId);
-      const soldFresh = !!(cachedSold && cachedSold.median != null && cachedSold.ts && (Date.now() - cachedSold.ts < SOLD_TTL_MS));
+      // A deep "full + medians" scan re-scrapes every median (ignoring the weekly cache) so all
+      // references are guaranteed current; a normal scan reuses a fresh cached median to save time.
+      const soldFresh = !opts.fullMedians && !!(cachedSold && cachedSold.median != null && cachedSold.ts && (Date.now() - cachedSold.ts < SOLD_TTL_MS));
 
       let data = { cleared: false, sold: null, listings: null };
       try { data = await loadReleaseData(cfWin, c.rel.releaseId, config.currency, { needSold: !soldFresh }); } catch { /* leave defaults */ }
@@ -511,6 +514,7 @@ async function runScrape(win, opts = {}) {
       let sold = cachedSold;
       if (data.sold && data.sold.median != null) { sold = data.sold; store.setSoldMedian(c.rel.releaseId, data.sold); }
       else if (data.cleared && data.sold && (!cachedSold || cachedSold.median == null)) { store.setSoldMedian(c.rel.releaseId, { median: null, low: null, high: null, lastSold: data.sold.lastSold || 'Never', ts: Date.now() }); }
+      if (data.sold) scrapedThisRun.add(c.rel.releaseId); // got a release-page read this run -> warm-up needn't redo it
 
       const common = {
         id: `${c.rel.releaseId}-scan`,
@@ -687,11 +691,14 @@ async function runScrape(win, opts = {}) {
     // Over a few scans the whole wantlist gets a real reference. Quick scans skip this (they're for
     // speed); the cf window + cf_clearance are already warm here, and it needs no API calls.
     let warmedReal = 0, warmedChecked = 0;
-    const WARMUP_BUDGET = opts.quick ? 0 : (() => { const v = Number(readSettings().soldMedianWarmup); return Number.isFinite(v) ? v : 50; })();
+    // A deep "full + medians" scan lifts the per-scan warm-up cap and re-scrapes EVERY median
+    // (ignoring the weekly freshness cache), so the whole wantlist's references are refreshed in one
+    // run instead of 50 at a time. A normal full scan keeps the bounded top-up; quick skips it.
+    const WARMUP_BUDGET = opts.quick ? 0 : (opts.fullMedians ? work.length : (() => { const v = Number(readSettings().soldMedianWarmup); return Number.isFinite(v) ? v : 50; })());
     if (WARMUP_BUDGET > 0 && !scrapeAbort) {
       const fresh = (id) => { const sm = store.getSoldMedian(id); return !!(sm && sm.ts && (Date.now() - sm.ts < SOLD_TTL_MS)); };
       const targets = work
-        .filter((rel) => !fresh(rel.releaseId))
+        .filter((rel) => (opts.fullMedians ? !scrapedThisRun.has(rel.releaseId) : !fresh(rel.releaseId)))
         .sort((a, b) => { const sa = store.getSoldMedian(a.releaseId), sb = store.getSoldMedian(b.releaseId); return (sa ? sa.ts : 0) - (sb ? sb.ts : 0); }) // never-cached first, then oldest
         .slice(0, WARMUP_BUDGET);
       for (let i = 0; i < targets.length; i++) {
@@ -742,8 +749,8 @@ async function runScrape(win, opts = {}) {
       mediansPush = await autoPushSoldMedians();
     }
 
-    send({ phase: 'done', checked: total, total, found: deals.length, confirmed, droppedNoVgPlus, unconfirmed, realShip, nearMisses: nearMissOut.length, warmedReal, warmedChecked, soldMediansExported, mediansPush, aborted: scrapeAbort, quick: !!opts.quick, wantlistTotal });
-    return { deals, nearMisses: nearMissOut, checked: total, total, confirmed, droppedNoVgPlus, unconfirmed, realShip, warmedReal, warmedChecked, aborted: scrapeAbort, quick: !!opts.quick, wantlistTotal };
+    send({ phase: 'done', checked: total, total, found: deals.length, confirmed, droppedNoVgPlus, unconfirmed, realShip, nearMisses: nearMissOut.length, warmedReal, warmedChecked, soldMediansExported, mediansPush, aborted: scrapeAbort, quick: !!opts.quick, fullMedians: !!opts.fullMedians, wantlistTotal });
+    return { deals, nearMisses: nearMissOut, checked: total, total, confirmed, droppedNoVgPlus, unconfirmed, realShip, warmedReal, warmedChecked, aborted: scrapeAbort, quick: !!opts.quick, fullMedians: !!opts.fullMedians, wantlistTotal };
   } finally {
     scrapeRunning = false;
     if (cfWin) { try { cfWin.destroy(); } catch { /* already gone */ } }

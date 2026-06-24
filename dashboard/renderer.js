@@ -254,13 +254,14 @@ function filterNearMisses(list) {
   return list.filter((d) => `${d.artist || ''} ${d.title || ''}`.toLowerCase().includes(q));
 }
 
-function applyFilters(deals) {
+function applyFilters(deals, opts = {}) {
   const q = $('search').value.trim().toLowerCase();
   const minV = parseFloat($('minValue').value) || 0;
   const minD = parseInt($('minDiscount').value, 10) / 100;
   const maxT = parseFloat($('maxTotal').value) || 0;
   const freshOnly = $('freshOnly').checked;
-  const vgOnly = $('vgPlusOnly').checked;
+  // opts.ignoreVg lets render() count how many deals are removed SOLELY by "VG+ only".
+  const vgOnly = opts.ignoreVg ? false : $('vgPlusOnly').checked;
   const showHidden = $('showHidden').checked;
   return deals.filter((d) => {
     if (!showHidden && dismissed.has(String(d.releaseId))) return false;
@@ -290,6 +291,10 @@ function sortDeals(list, mode) {
 function render() {
   const enriched = allDeals.map(enrich);
   let deals = applyFilters(enriched);
+  // How many deals pass every OTHER filter but are removed SOLELY by "VG+ only"? Cloud/email deals
+  // can never carry a confirmed grade, so "VG+ only" silently hides every one of them — which is
+  // exactly why a deal you were emailed can be invisible here. Surface the number so it's never silent.
+  const vgHidden = $('vgPlusOnly').checked ? Math.max(0, applyFilters(enriched, { ignoreVg: true }).length - deals.length) : 0;
   deals = sortDeals(deals, $('sortBy').value);
   // Near-misses: opt-in, scan-only. Rendered below the deals with the reason each didn't qualify.
   const showMiss = $('showNearMiss').checked && viewMode === 'scan' && allNearMisses.length > 0;
@@ -298,12 +303,16 @@ function render() {
   const empty = $('empty');
   const hiddenCount = allDeals.reduce((acc, d) => acc + (dismissed.has(String(d.releaseId)) ? 1 : 0), 0);
   const hiddenNote = hiddenCount ? ` · ${hiddenCount} hidden` : '';
+  const vgNote = vgHidden ? ` · ${vgHidden} hidden by “VG+ only”` : '';
   $('pill-deals').textContent = `${allDeals.length} deal${allDeals.length === 1 ? '' : 's'}`;
-  $('resultCount').textContent = deals.length ? `${deals.length} of ${allDeals.length}${hiddenNote}${viewMode === 'scan' ? ' · live scan' : ''}` : '';
+  $('resultCount').textContent = deals.length ? `${deals.length} of ${allDeals.length}${hiddenNote}${vgNote}${viewMode === 'scan' ? ' · live scan' : ''}` : '';
   if (!deals.length && !misses.length) {
     wrap.innerHTML = '';
     empty.classList.remove('hidden');
-    empty.textContent = allDeals.length ? 'No deals match your filters — loosen the sliders or untick “VG+ only”.'
+    empty.textContent = allDeals.length
+      ? (vgHidden
+          ? `${vgHidden} deal${vgHidden === 1 ? '' : 's'} hidden by “VG+ only” — untick it to see ${vgHidden === 1 ? 'it' : 'them'} (cloud/email deals can’t be condition-verified).`
+          : 'No deals match your filters — loosen the sliders.')
       : (viewMode === 'scan' ? 'Scan finished — no confirmed VG+ copies meet your discount threshold right now.'
         : 'No deals yet — the watcher fills this in as cheap copies appear. Or hit ⚡ Scan now.');
     return;
@@ -463,6 +472,7 @@ function setScanUI(on) {
   $('scanbar').classList.toggle('hidden', !on);
   $('btn-scan').disabled = on;
   $('btn-quickscan').disabled = on;
+  $('btn-fullscan').disabled = on;
   $('btn-scan').textContent = on ? '⏳ Scanning…' : '⚡ Scan now';
   // While a scan runs the badge says "Scanning…"; once it ends, re-check the real service state.
   if (on) setServiceBadge(lastHealth); else refreshHealth();
@@ -516,7 +526,7 @@ function onScanProgress(m) {
   }
   if (m.phase === 'warmup') {
     $('scan-fill').style.width = '100%';
-    $('scan-text').textContent = `Building sold-median coverage ${m.checked}/${m.total}… (so cloud emails judge against real market value)`;
+    $('scan-text').textContent = `Refreshing sold-medians ${m.checked}/${m.total}… (real market value — also sharpens cloud emails)`;
     return;
   }
   if (m.phase === 'pushing') { $('scan-text').textContent = 'Saving sold-medians to GitHub for the email watcher…'; return; }
@@ -533,7 +543,7 @@ function onScanProgress(m) {
     const ship = m.realShip != null && m.found ? ` · ${m.realShip}/${m.found} with real shipping` : '';
     const cov = m.quick ? ` · quick scan (top ${m.total} of ${m.wantlistTotal})` : '';
     const miss = m.nearMisses ? ` · ${m.nearMisses} near-miss${m.nearMisses === 1 ? '' : 'es'} (tick “Show near-misses”)` : '';
-    const warm = m.warmedReal ? ` · ${m.warmedReal} new sold-median${m.warmedReal === 1 ? '' : 's'} learned` : '';
+    const warm = m.warmedReal ? ` · ${m.warmedReal} sold-median${m.warmedReal === 1 ? '' : 's'} ${m.fullMedians ? 'refreshed' : 'learned'}` : '';
     $('scan-text').textContent = `Done — ${m.found} VG+ deal${m.found === 1 ? '' : 's'}${ship}${dropped}${cov}${m.aborted ? ' (stopped early)' : ''}.${push}${warm}${miss}`;
     return;
   }
@@ -622,6 +632,7 @@ async function testConnection() {
 window.addEventListener('DOMContentLoaded', () => {
   $('btn-scan').addEventListener('click', () => startScan());
   $('btn-quickscan').addEventListener('click', () => startScan({ quick: true }));
+  $('btn-fullscan').addEventListener('click', () => startScan({ fullMedians: true }));
   $('btn-scan-cancel').addEventListener('click', () => { if (hasApi) window.api.scrapeCancel(); $('scan-text').textContent = 'Stopping…'; });
   $('btn-refresh').addEventListener('click', () => { viewMode = 'cloud'; refresh(); refreshHealth(); });
   $('btn-settings').addEventListener('click', openSettings);
