@@ -36,9 +36,11 @@ const DEFAULTS = {
   perReleaseGapMs: 0, // extra spacing on top of the client's own throttle
 };
 
-function loadConfig() {
+// configPath is optional: the cloud watcher reads config.json next to this file, but the desktop
+// dashboard (packaged) passes a path inside its per-user app-data dir written by the setup wizard.
+function loadConfig(configPath) {
   let file = {};
-  const p = path.join(__dirname, 'config.json');
+  const p = configPath || path.join(__dirname, 'config.json');
   try { file = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { /* no file: env-only (cloud) */ }
   const env = process.env;
   const cfg = {

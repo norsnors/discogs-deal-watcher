@@ -79,10 +79,14 @@
   <div id="settings-modal" class="modal hidden">
     <div class="modal-card">
       <h2>Settings</h2>
-      <p class="hint">Where should the dashboard read already-found deals from? (The <b>⚡ Scan now</b> button always works locally, independently of this.)</p>
+      <label>Discogs account
+        <button type="button" id="set-account-btn" class="ghost">Edit username / token…</button>
+      </label>
+      <p class="hint">Where should the dashboard read deals from? <b>Local scan</b> works with just your Discogs token (no cloud). The other modes are only for when you run your own cloud watcher.</p>
       <label>Source
         <select id="set-sourceType">
-          <option value="github">GitHub Actions — reads the committed deals.json (default)</option>
+          <option value="scan">Local scan only — no cloud (default)</option>
+          <option value="github">GitHub Actions — reads a committed deals.json</option>
           <option value="server">Live server — watcher.js on Fly / localhost</option>
         </select>
       </label>
@@ -119,6 +123,47 @@
         <span class="spacer"></span>
         <button id="set-cancel" class="ghost">Cancel</button>
         <button id="set-save" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- First-run / Discogs account wizard -->
+  <div id="wizard-modal" class="modal hidden">
+    <div class="modal-card">
+      <h2 id="wiz-title">Welcome 👋</h2>
+      <p class="hint" id="wiz-intro">Enter your Discogs details so the app can scan your wantlist for bargains. Everything stays local on this PC — your token is never sent anywhere except to Discogs.</p>
+      <label>Discogs username
+        <input type="text" id="wiz-username" placeholder="your Discogs username" autocomplete="off" spellcheck="false" />
+      </label>
+      <label>Discogs personal access token
+        <input type="password" id="wiz-token" placeholder="paste your token here" autocomplete="off" spellcheck="false" />
+      </label>
+      <p class="hint">
+        <a href="#" id="wiz-token-help">How do I get a token? →</a><br />
+        On Discogs: <b>Settings → Developers → Generate new token</b>. It's free and gives access to your own wantlist + price suggestions.
+      </p>
+      <label>Currency
+        <select id="wiz-currency">
+          <option value="EUR">EUR — €</option>
+          <option value="GBP">GBP — £</option>
+          <option value="USD">USD — $</option>
+          <option value="CAD">CAD</option>
+          <option value="AUD">AUD</option>
+          <option value="JPY">JPY — ¥</option>
+          <option value="CHF">CHF</option>
+          <option value="SEK">SEK</option>
+          <option value="NZD">NZD</option>
+          <option value="MXN">MXN</option>
+          <option value="BRL">BRL</option>
+          <option value="ZAR">ZAR</option>
+        </select>
+      </label>
+      <div id="wiz-test" class="test-result"></div>
+      <div class="modal-actions">
+        <button id="wiz-test-btn" class="ghost">Test connection</button>
+        <span class="spacer"></span>
+        <button id="wiz-cancel" class="ghost">Later</button>
+        <button id="wiz-save" class="primary">Save &amp; scan</button>
       </div>
     </div>
   </div>

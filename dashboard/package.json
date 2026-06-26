@@ -1,15 +1,61 @@
 {
   "name": "discogs-deal-dashboard",
-  "version": "0.1.0",
+  "productName": "Discogs Deal Watcher",
+  "version": "1.0.0",
   "private": true,
-  "description": "Desktop dashboard for the Discogs Deal Watcher — shows recent wantlist deals from the cloud watcher.",
+  "description": "Discogs Deal Watcher — scans your Discogs wantlist for copies offered far under market value.",
+  "author": "Discogs Deal Watcher",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "build": "electron-packager . DiscogsDeals --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico"
+    "build": "electron-builder --win nsis",
+    "build:dir": "electron-builder --win dir",
+    "build:mac": "electron-builder --mac dmg"
+  },
+  "build": {
+    "appId": "com.discogsdealwatcher.app",
+    "productName": "Discogs Deal Watcher",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer.js",
+      "index.html",
+      "styles.css",
+      "assets/**/*"
+    ],
+    "extraResources": [
+      { "from": "../engine.js", "to": "watcher/engine.js" },
+      { "from": "../discogs.js", "to": "watcher/discogs.js" },
+      { "from": "../store.js", "to": "watcher/store.js" },
+      { "from": "../watcher.js", "to": "watcher/watcher.js" }
+    ],
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Discogs Deal Watcher",
+      "artifactName": "Discogs-Deal-Watcher-Setup-${version}.${ext}"
+    },
+    "mac": {
+      "target": [{ "target": "dmg", "arch": ["universal"] }],
+      "category": "public.app-category.music",
+      "icon": "assets/icon.icns"
+    },
+    "dmg": {
+      "artifactName": "Discogs-Deal-Watcher-${version}-mac.${ext}"
+    }
   },
   "devDependencies": {
     "electron": "^31.0.0",
-    "electron-packager": "^17.1.2"
+    "electron-builder": "^26.15.3"
   }
 }

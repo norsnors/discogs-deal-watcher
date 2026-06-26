@@ -4,6 +4,10 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('api', {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (s) => ipcRenderer.invoke('settings:set', s),
+  // Discogs account config (first-run wizard / Settings). getConfig never returns the token itself.
+  getConfig: () => ipcRenderer.invoke('config:get'),
+  saveConfig: (c) => ipcRenderer.invoke('config:set', c),
+  testConfig: (c) => ipcRenderer.invoke('config:test', c),
   getDeals: (limit) => ipcRenderer.invoke('deals:get', limit),
   getStatus: () => ipcRenderer.invoke('status:get'),
   getHealth: () => ipcRenderer.invoke('health:get'),

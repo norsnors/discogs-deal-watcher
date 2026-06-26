@@ -20,9 +20,9 @@
   "email": {
     "provider": "resend",
     "apiKey": "re_YOUR_RESEND_API_KEY",
-    "to": "riminiexpressdj@gmail.com",
+    "to": "you@example.com",
     "from": "Discogs Deal Watcher <onboarding@resend.dev>",
-    "replyTo": "riminiexpressdj@gmail.com"
+    "replyTo": "you@example.com"
   },
 
   "_email_deliverability_note": "from=onboarding@resend.dev is Resend's SANDBOX sender: spam-prone and only delivers to your own verified address. For reliable inbox delivery, verify a sending domain in Resend (DKIM/SPF/DMARC) and set `from` to an address on it (env: MAIL_FROM). Until then, add a Gmail filter to never mark these as spam. See README 'Email deliverability'.",
@@ -32,6 +32,6 @@
     "provider": "gmail",
     "user": "youraddress@gmail.com",
     "appPassword": "16charAppPassword",
-    "to": "riminiexpressdj@gmail.com"
+    "to": "you@example.com"
   }
 }

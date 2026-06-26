@@ -31,6 +31,8 @@ let seenIds = new Set();
 let firstLoad = true;
 let viewMode = 'cloud';   // 'cloud' | 'scan'
 let scanning = false;
+let scannedOnce = false;  // has a local scan run (or its results been loaded) this session? Distinguishes
+                          // "no scan yet — go scan" from "scanned, nothing matched right now".
 
 const $ = (id) => document.getElementById(id);
 const openUrl = (url) => { if (!url) return; if (hasApi) window.api.openExternal(url); else window.open(url, '_blank'); };
@@ -313,8 +315,11 @@ function render() {
       ? (vgHidden
           ? `${vgHidden} deal${vgHidden === 1 ? '' : 's'} hidden by “VG+ only” — untick it to see ${vgHidden === 1 ? 'it' : 'them'} (cloud/email deals can’t be condition-verified).`
           : 'No deals match your filters — loosen the sliders.')
-      : (viewMode === 'scan' ? 'Scan finished — no confirmed VG+ copies meet your discount threshold right now.'
-        : 'No deals yet — the watcher fills this in as cheap copies appear. Or hit ⚡ Scan now.');
+      : (viewMode === 'scan'
+          ? (scannedOnce
+              ? 'Scan finished — no confirmed VG+ copies meet your discount threshold right now.'
+              : 'No scan yet. Hit ⚡ Scan now to sweep your wantlist for bargains (~13 min).')
+          : 'No deals yet — the watcher fills this in as cheap copies appear. Or hit ⚡ Scan now.');
     return;
   }
   empty.classList.add('hidden');
@@ -366,6 +371,12 @@ function setServiceBadge(h) {
       sub = last ? `swept ${ago(last)}` : 'connected';
       title = `Watcher server reachable${last ? ` · last sweep ${ago(last)}` : ''}.`;
     }
+  } else if (h.mode === 'local') {
+    // Local-scan mode: no cloud service to monitor. The badge reflects the last scan instead.
+    const last = h.lastScanAt;
+    state = 'idle'; text = 'Local';
+    sub = last ? `scanned ${ago(last)}` : 'no scan yet';
+    title = 'Local-scan mode — no cloud watcher. Use ⚡ Scan now to refresh deals.';
   } else { // github
     const run = (h.ok && h.run) ? h.run : (h.rateLimited ? lastGithubRun : null);
     if (!run) {
@@ -487,6 +498,7 @@ async function startScan(opts = {}) {
   try {
     const res = await window.api.scrapeRun(opts);
     viewMode = 'scan';
+    scannedOnce = true;
     allDeals = (res && res.deals) || [];
     allNearMisses = (res && res.nearMisses) || [];
     seenIds = new Set(allDeals.map((d) => d.id));
@@ -506,7 +518,10 @@ async function startScan(opts = {}) {
 // scan pushes soldmedians.json as YOU, regular auto-scans also keep the GitHub cron from being
 // disabled after 60 days of no user activity.
 async function maybeAutoScan() {
-  if (!hasApi || scanning || viewMode === 'scan') return;
+  if (!hasApi || scanning) return; // the age check below prevents redundant scans; don't gate on viewMode
+  // Need a configured Discogs token, or a scan can't run (and would just error).
+  let cfg; try { cfg = await window.api.getConfig(); } catch { cfg = null; }
+  if (!cfg || !cfg.hasToken || !cfg.username) return;
   let s; try { s = await window.api.getSettings(); } catch { return; }
   const hrs = Number(s.autoScanOnLaunchHours || 0);
   if (!hrs) return;
@@ -569,8 +584,8 @@ function toggleSrc() {
 }
 
 async function openSettings() {
-  const s = hasApi ? await window.api.getSettings() : { sourceType: 'github', githubRepo: 'norsnors/discogs-deal-watcher', githubToken: '', apiBase: '', token: '', autoScanOnLaunchHours: 1 };
-  $('set-sourceType').value = s.sourceType || 'github';
+  const s = hasApi ? await window.api.getSettings() : { sourceType: 'scan', githubRepo: '', githubToken: '', apiBase: '', token: '', autoScanOnLaunchHours: 1 };
+  $('set-sourceType').value = s.sourceType || 'scan';
   $('set-apiBase').value = s.apiBase || '';
   $('set-token').value = s.token || '';
   $('set-githubRepo').value = s.githubRepo || '';
@@ -605,10 +620,9 @@ async function persistSettings() {
 async function saveSettings() {
   await persistSettings();
   closeSettings();
-  viewMode = 'cloud'; firstLoad = true; seenIds = new Set();
-  lastGithubRun = null; // source may have changed (server <-> github) — don't carry a stale run
-  refresh();
-  refreshHealth();
+  firstLoad = true; seenIds = new Set();
+  lastGithubRun = null; // source may have changed (scan <-> github <-> server) — don't carry a stale run
+  boot(); // re-evaluate the (possibly changed) source: scan view, cloud poll, or server
 }
 
 async function testConnection() {
@@ -628,6 +642,93 @@ async function testConnection() {
   }
 }
 
+// --- First-run / Discogs account wizard ---
+async function openWizard(firstRun) {
+  let c = null;
+  if (hasApi) { try { c = await window.api.getConfig(); } catch { c = null; } }
+  $('wiz-username').value = (c && c.username) || '';
+  $('wiz-token').value = '';
+  $('wiz-token').placeholder = (c && c.hasToken) ? 'leave blank to keep your saved token' : 'paste your token here';
+  $('wiz-currency').value = (c && c.currency) || 'EUR';
+  $('wiz-title').textContent = firstRun ? 'Welcome 👋' : 'Discogs account';
+  $('wiz-intro').classList.toggle('hidden', !firstRun);
+  $('wiz-cancel').textContent = firstRun ? 'Later' : 'Cancel';
+  $('wiz-test').textContent = ''; $('wiz-test').className = 'test-result';
+  $('wizard-modal').classList.remove('hidden');
+  $('wiz-username').focus();
+}
+function closeWizard() { $('wizard-modal').classList.add('hidden'); }
+
+async function wizardTest() {
+  const el = $('wiz-test');
+  if (!hasApi) { el.textContent = 'Demo mode (no Electron bridge).'; el.className = 'test-result'; return; }
+  const username = $('wiz-username').value.trim();
+  const token = $('wiz-token').value.trim();
+  if (!token) { el.textContent = 'Enter your token first.'; el.className = 'test-result bad'; return; }
+  el.textContent = 'Testing…'; el.className = 'test-result';
+  try {
+    const r = await window.api.testConfig({ username, token });
+    if (r && r.ok) {
+      el.textContent = `OK — signed in as ${r.username}${r.wantlist != null ? ` · ${r.wantlist} releases on the wantlist` : ''}.`;
+      el.className = 'test-result ok';
+    } else {
+      el.textContent = (r && r.error) || 'Failed.';
+      el.className = 'test-result bad';
+    }
+  } catch (e) { el.textContent = 'Failed: ' + e.message; el.className = 'test-result bad'; }
+}
+
+async function wizardSave() {
+  if (!hasApi) { closeWizard(); return; }
+  const el = $('wiz-test');
+  const username = $('wiz-username').value.trim();
+  const token = $('wiz-token').value.trim();
+  const currency = $('wiz-currency').value;
+  if (!username) { el.textContent = 'Please enter your Discogs username.'; el.className = 'test-result bad'; return; }
+  let cfg = null; try { cfg = await window.api.getConfig(); } catch { cfg = null; }
+  if (!token && !(cfg && cfg.hasToken)) { el.textContent = 'Please enter your Discogs token.'; el.className = 'test-result bad'; return; }
+  const patch = { username, currency };
+  if (token) patch.token = token; // blank = keep the saved token
+  await window.api.saveConfig(patch);
+  closeWizard();
+  // Creds now exist — surface deals by kicking off a scan (the core action for a fresh install).
+  viewMode = 'scan';
+  startScan();
+}
+
+// Decide what to show on launch: the first-run wizard if there are no Discogs creds, otherwise the
+// configured deal source ('scan' by default).
+async function boot() {
+  if (!hasApi) { refresh(); return; }
+  let cfg = null; try { cfg = await window.api.getConfig(); } catch { cfg = null; }
+  if (!cfg || !cfg.hasToken || !cfg.username) {
+    viewMode = 'scan';
+    $('deals').innerHTML = '';
+    $('empty').classList.remove('hidden');
+    $('empty').textContent = 'Welcome! Enter your Discogs username + token to start (⚙ Settings → Discogs account), then hit ⚡ Scan now.';
+    openWizard(true);
+    refreshHealth();
+    return;
+  }
+  let s = null; try { s = await window.api.getSettings(); } catch { s = {}; }
+  const src = (s && s.sourceType) || 'scan';
+  if (src === 'scan') {
+    viewMode = 'scan';
+    let last = null; try { last = await window.api.scrapeLast(); } catch { last = null; }
+    if (last && Array.isArray(last.deals)) {
+      scannedOnce = true;
+      allDeals = last.deals; allNearMisses = last.nearMisses || []; seenIds = new Set(allDeals.map((d) => d.id));
+      setStatus({ wantlistSize: last.wantlistTotal != null ? last.wantlistTotal : '—' });
+    } else {
+      allDeals = []; allNearMisses = [];
+    }
+    render();
+  } else {
+    refresh();
+  }
+  refreshHealth();
+}
+
 // --- wire up ---
 window.addEventListener('DOMContentLoaded', () => {
   $('btn-scan').addEventListener('click', () => startScan());
@@ -641,6 +742,13 @@ window.addEventListener('DOMContentLoaded', () => {
   $('set-save').addEventListener('click', saveSettings);
   $('set-test-btn').addEventListener('click', testConnection);
   $('set-sourceType').addEventListener('change', toggleSrc);
+  $('set-account-btn').addEventListener('click', () => { closeSettings(); openWizard(false); });
+
+  // Wizard
+  $('wiz-test-btn').addEventListener('click', wizardTest);
+  $('wiz-save').addEventListener('click', wizardSave);
+  $('wiz-cancel').addEventListener('click', closeWizard);
+  $('wiz-token-help').addEventListener('click', (e) => { e.preventDefault(); openUrl('https://www.discogs.com/settings/developers'); });
 
   $('search').addEventListener('input', render);
   $('sortBy').addEventListener('change', render);
@@ -656,8 +764,7 @@ window.addEventListener('DOMContentLoaded', () => {
   if (hasApi) window.api.onScrapeProgress(onScanProgress);
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
 
-  refresh();
-  refreshHealth();                // light up the live-service badge on first paint
+  boot();                         // first-run wizard, last scan, or cloud poll — and lights up the badge
   if (hasApi) {
     setInterval(refresh, 30_000); // poll the cloud every 30s (paused during a local scan)
     // Check the real service heartbeat every 2 min. Slow on purpose: the cron only fires every

@@ -1,0 +1,70 @@
+name: Build macOS app
+
+# Manual trigger: build a universal macOS .dmg of the dashboard and attach it to a release.
+# GitHub's macOS runners are free for public repos. The build is UNSIGNED (no Apple Developer
+# cert), so users clear quarantine once on first launch — see INSTALL.md / the release notes.
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to attach the .dmg to'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write   # needed for `gh release upload`
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # electron-builder wants a .icns for macOS; generate it from the existing app icon.
+      - name: Make .icns from the app icon
+        working-directory: dashboard/assets
+        run: |
+          set -e
+          rm -rf icon.iconset && mkdir icon.iconset
+          sips -z 16 16     icon.png --out icon.iconset/icon_16x16.png
+          sips -z 32 32     icon.png --out icon.iconset/icon_16x16@2x.png
+          sips -z 32 32     icon.png --out icon.iconset/icon_32x32.png
+          sips -z 64 64     icon.png --out icon.iconset/icon_32x32@2x.png
+          sips -z 128 128   icon.png --out icon.iconset/icon_128x128.png
+          sips -z 256 256   icon.png --out icon.iconset/icon_128x128@2x.png
+          sips -z 256 256   icon.png --out icon.iconset/icon_256x256.png
+          sips -z 512 512   icon.png --out icon.iconset/icon_256x256@2x.png
+          sips -z 512 512   icon.png --out icon.iconset/icon_512x512.png
+          sips -z 1024 1024 icon.png --out icon.iconset/icon_512x512@2x.png
+          iconutil -c icns icon.iconset -o icon.icns
+          rm -rf icon.iconset
+
+      - name: Install dependencies
+        working-directory: dashboard
+        run: npm install
+
+      - name: Build universal macOS .dmg
+        working-directory: dashboard
+        env:
+          # Build unsigned: there's no Apple Developer cert in CI. electron-builder still ad-hoc
+          # signs the arm64 slice so the app can launch on Apple Silicon after quarantine removal.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run build:mac
+
+      - name: Upload .dmg as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dashboard/dist/*.dmg
+          if-no-files-found: error
+
+      - name: Attach .dmg to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.event.inputs.release_tag }}" dashboard/dist/*.dmg --clobber --repo "${{ github.repository }}"

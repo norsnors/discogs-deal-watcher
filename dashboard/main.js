@@ -20,20 +20,34 @@ const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
 
-// The watcher project lives one level up (this dashboard is a sibling Electron app).
-const WATCHER_DIR = path.join(__dirname, '..');
+// Where the watcher's pure modules (engine/discogs/store/watcher.js) live:
+//   • dev run  — one level up, in the project checkout.
+//   • packaged — bundled into the app's resources/ via electron-builder extraResources.
+const WATCHER_DIR = app.isPackaged
+  ? path.join(process.resourcesPath, 'watcher')
+  : path.join(__dirname, '..');
+
+// Where the USER's own data lives — config.json (Discogs creds), the state/ cache, sold-medians:
+//   • dev run  — the project folder (shared with the cloud watcher; the soldmedians git push works).
+//   • packaged — the OS per-user app-data dir (Program Files is read-only). The first-run setup
+//     wizard writes config.json there. Computed lazily because app.getPath needs the app ready.
+function dataDir() { return app.isPackaged ? app.getPath('userData') : WATCHER_DIR; }
+function configPath() { return path.join(dataDir(), 'config.json'); }
+function stateDir() { return path.join(dataDir(), 'state'); }
 
 const SETTINGS_FILE = () => path.join(app.getPath('userData'), 'settings.json');
-// Ship working defaults: the public repo, GitHub source, no token needed → deals on first launch.
+// Defaults for a fresh, shareable install: no cloud is configured, so the LOCAL SCAN is the deal
+// source out of the box (it works with just a Discogs token — no GitHub/server needed). Anyone
+// running their own cloud watcher can point this at their repo/server in Settings.
 const DEFAULT_SETTINGS = {
-  sourceType: 'github',
-  githubRepo: 'norsnors/discogs-deal-watcher',
+  sourceType: 'scan',        // 'scan' (local, default) | 'github' | 'server'
+  githubRepo: '',
   githubBranch: 'main',
   githubToken: '',
-  apiBase: 'http://localhost:8787',
+  apiBase: '',
   token: '',
-  autoPushMedians: true, // after a scan, auto commit+push soldmedians.json so the cloud emails use it
-  autoScanOnLaunchHours: 1, // keep a fresh scan while the app is open: re-scan whenever the last one is older than this many hours (also gates the launch scan). 0 = off
+  autoPushMedians: true, // dev/owner only: after a scan, commit+push soldmedians.json for the cloud
+  autoScanOnLaunchHours: 1, // re-scan while the app is open whenever the last scan is older than this many hours (also gates the launch scan). 0 = off
 };
 
 function readSettings() {
@@ -123,13 +137,20 @@ async function githubDeals(s) {
 
 async function getDeals(limit) {
   const s = readSettings();
-  if ((s.sourceType || 'github') === 'server') return serverGet(s, '/api/deals?limit=' + (limit || 200));
-  return githubDeals(s);
+  const src = s.sourceType || 'scan';
+  if (src === 'server') return serverGet(s, '/api/deals?limit=' + (limit || 200));
+  if (src === 'github') return githubDeals(s);
+  // 'scan' (default for a fresh install): no cloud — show whatever the last local scan found.
+  const last = lastScan();
+  return (last && Array.isArray(last.deals)) ? last.deals : [];
 }
 async function getStatus() {
   const s = readSettings();
-  if ((s.sourceType || 'github') === 'server') return serverGet(s, '/api/status');
-  return { sourceType: 'github', repo: s.githubRepo };
+  const src = s.sourceType || 'scan';
+  if (src === 'server') return serverGet(s, '/api/status');
+  if (src === 'github') return { sourceType: 'github', repo: s.githubRepo };
+  const last = lastScan();
+  return { sourceType: 'scan', wantlistSize: (last && last.wantlistTotal != null) ? last.wantlistTotal : '—' };
 }
 
 // ---------------------------------------------------------------------------
@@ -181,7 +202,13 @@ async function githubHealth(s) {
 
 async function getServiceHealth() {
   const s = readSettings();
-  if ((s.sourceType || 'github') === 'server') {
+  const src = s.sourceType || 'scan';
+  if (src === 'scan') {
+    // No cloud watcher in local-scan mode — the "service" is your own ⚡ Scan now.
+    const last = lastScan();
+    return { mode: 'local', ok: true, lastScanAt: (last && last.ts) ? last.ts : null };
+  }
+  if (src === 'server') {
     try { return { mode: 'server', ok: true, apiBase: s.apiBase, status: await serverGet(s, '/api/status') }; }
     catch (e) { return { mode: 'server', ok: false, apiBase: s.apiBase, error: e.message }; }
   }
@@ -214,7 +241,9 @@ function loadWatcher() {
       loadConfig: require(path.join(WATCHER_DIR, 'watcher.js')).loadConfig,
     };
   } catch (e) {
-    throw new Error('Local scan needs the watcher source next to the dashboard (run it from the project, not a packaged build). ' + e.message);
+    // Packaged builds bundle these into resources/watcher (see electron-builder extraResources); a
+    // dev run reads them from the project one level up. Either way, a failure here is a broken install.
+    throw new Error('Could not load the watcher engine (' + WATCHER_DIR + '). Reinstall the app. ' + e.message);
   }
 }
 
@@ -441,11 +470,11 @@ async function runScrape(win, opts = {}) {
   let cfWin = null;
   try {
     const { engine, makeClient, makeStore, loadConfig } = loadWatcher();
-    const config = loadConfig();
-    if (!config.token) throw new Error('No Discogs token in config.json — add it to enable local scans.');
-    if (!config.username) throw new Error('No Discogs username in config.json.');
+    const config = loadConfig(configPath());
+    if (!config.token) throw new Error('No Discogs token configured — open Settings → Discogs account.');
+    if (!config.username) throw new Error('No Discogs username configured — open Settings → Discogs account.');
 
-    const store = makeStore(path.join(WATCHER_DIR, 'state'));
+    const store = makeStore(stateDir());
     // Slightly tighter pacing than the cloud default (1100ms) for this interactive scan: 1050ms is
     // ~57 req/min — under Discogs' 60/min cap AND clear of the client's near-empty-window guard (which
     // would 60s-stall if `remaining` hit 1), so it shaves ~30-40s off a full sweep without risking a
@@ -728,25 +757,31 @@ async function runScrape(win, opts = {}) {
     // state/soldmedians.json (which can't reach GitHub); soldmedians.json at the repo root can —
     // commit + push it and watch-once.js seeds it on the next sweep. This is how a local scan makes
     // the EMAILS smarter (its main job), beyond just showing results in the dashboard.
+    // Exporting medians to a committable root file + git-pushing them only makes sense for the OWNER
+    // running from the project checkout (there's a git repo and a cloud watcher to feed). A packaged,
+    // shared install has no repo — its medians just live in the local state/ cache, which is all the
+    // dashboard needs. So this whole step is dev-only.
     let soldMediansExported = 0;
-    try {
-      const src = path.join(WATCHER_DIR, 'state', 'soldmedians.json');
-      if (fs.existsSync(src)) {
-        const sm = JSON.parse(fs.readFileSync(src, 'utf8'));
-        // Commit only REAL medians — drop the "never sold" sentinels (median null) the warm-up keeps
-        // locally to avoid re-scraping; the cloud only wants true market references.
-        const real = {};
-        if (sm && typeof sm === 'object') for (const [id, v] of Object.entries(sm)) if (v && v.median != null) real[id] = v;
-        soldMediansExported = Object.keys(real).length;
-        if (soldMediansExported) fs.writeFileSync(path.join(WATCHER_DIR, 'soldmedians.json'), JSON.stringify(real));
-      }
-    } catch { /* non-fatal: the export is a convenience for committing, not the scan result */ }
-
-    // Auto-commit + push the refreshed medians so the cloud emails use them with no manual git step.
     let mediansPush = null;
-    if (soldMediansExported && readSettings().autoPushMedians !== false) {
-      send({ phase: 'pushing' });
-      mediansPush = await autoPushSoldMedians();
+    if (!app.isPackaged) {
+      try {
+        const src = path.join(stateDir(), 'soldmedians.json');
+        if (fs.existsSync(src)) {
+          const sm = JSON.parse(fs.readFileSync(src, 'utf8'));
+          // Commit only REAL medians — drop the "never sold" sentinels (median null) the warm-up keeps
+          // locally to avoid re-scraping; the cloud only wants true market references.
+          const real = {};
+          if (sm && typeof sm === 'object') for (const [id, v] of Object.entries(sm)) if (v && v.median != null) real[id] = v;
+          soldMediansExported = Object.keys(real).length;
+          if (soldMediansExported) fs.writeFileSync(path.join(WATCHER_DIR, 'soldmedians.json'), JSON.stringify(real));
+        }
+      } catch { /* non-fatal: the export is a convenience for committing, not the scan result */ }
+
+      // Auto-commit + push the refreshed medians so the cloud emails use them with no manual git step.
+      if (soldMediansExported && readSettings().autoPushMedians !== false) {
+        send({ phase: 'pushing' });
+        mediansPush = await autoPushSoldMedians();
+      }
     }
 
     send({ phase: 'done', checked: total, total, found: deals.length, confirmed, droppedNoVgPlus, unconfirmed, realShip, nearMisses: nearMissOut.length, warmedReal, warmedChecked, soldMediansExported, mediansPush, aborted: scrapeAbort, quick: !!opts.quick, fullMedians: !!opts.fullMedians, wantlistTotal });
@@ -760,6 +795,62 @@ async function runScrape(win, opts = {}) {
 function lastScan() {
   try { return JSON.parse(fs.readFileSync(LAST_SCAN_FILE(), 'utf8')); } catch { return null; }
 }
+
+// ---------------------------------------------------------------------------
+// Discogs account config — written by the first-run setup wizard.
+// ---------------------------------------------------------------------------
+// Lives in config.json (dataDir): the same shape watcher.js loadConfig() reads, so a packaged
+// app and the dev/owner project share one format. We never send the token back to the renderer
+// (only `hasToken`); the wizard collects a fresh one if the user wants to change it.
+function readConfigFile() {
+  try { return JSON.parse(fs.readFileSync(configPath(), 'utf8')); } catch { return {}; }
+}
+function writeConfigFile(patch) {
+  const next = { ...readConfigFile(), ...(patch || {}) };
+  fs.mkdirSync(dataDir(), { recursive: true });
+  fs.writeFileSync(configPath(), JSON.stringify(next, null, 2));
+  return true;
+}
+
+// Validate Discogs credentials live: the personal token via /oauth/identity (401 if bad), and the
+// username by counting its wantlist. Returns a friendly {ok, username, wantlist} / {ok:false, error}.
+async function testConfig({ username, token } = {}) {
+  let makeClient;
+  try { ({ makeClient } = loadWatcher()); }
+  catch (e) { return { ok: false, error: e.message }; }
+  const client = makeClient({ token: (token || '').trim(), userAgent: 'DiscogsDealWatcher/1.0 (desktop setup test)' });
+  let who;
+  try {
+    const id = await client.req('/oauth/identity');
+    who = id && id.data ? id.data.username : null;
+    if (!who) return { ok: false, error: 'Token werd niet geaccepteerd — controleer je persoonlijke token.' };
+  } catch (e) {
+    if (e && e.status === 401) return { ok: false, error: 'Token ongeldig (401) — controleer je persoonlijke token.' };
+    return { ok: false, error: 'Kon Discogs niet bereiken: ' + (e && e.message ? e.message : String(e)) };
+  }
+  const uname = (username || '').trim();
+  if (!uname) return { ok: true, username: who, wantlist: null };
+  try {
+    const wl = await client.getWantlist(uname);
+    return { ok: true, username: who, wantlist: wl.length };
+  } catch (e) {
+    return { ok: false, error: `Token werkt (ingelogd als ${who}), maar wantlist van "${uname}" ophalen mislukte: ${e && e.message ? e.message : e}` };
+  }
+}
+
+ipcMain.handle('config:get', () => {
+  const c = readConfigFile();
+  return {
+    username: c.username || '',
+    currency: c.currency || 'EUR',
+    hasToken: !!c.token,
+    minDiscount: c.minDiscount,
+    minReference: c.minReference,
+    shippingEstimate: c.shippingEstimate,
+  };
+});
+ipcMain.handle('config:set', (_e, patch) => writeConfigFile(patch));
+ipcMain.handle('config:test', (_e, creds) => testConfig(creds || {}));
 
 ipcMain.handle('settings:get', () => readSettings());
 ipcMain.handle('settings:set', (_e, s) => { writeSettings(s); return true; });
