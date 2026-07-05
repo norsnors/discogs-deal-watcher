@@ -570,6 +570,44 @@ function setServiceBadge(h) {
   if (sweep) sweep.textContent = sub;
 }
 
+// --- Cron pill: "when did the cloud cron actually FIRE?" -------------------
+// Shows the last real firing of the email watcher's GitHub Actions cron — and how long ago — in
+// EVERY source mode (in local-scan mode the repo is auto-derived from the checkout's git remote).
+// The tooltip lists the recent fires + the measured cadence: GitHub deprioritizes public-repo
+// schedule crons, so the REQUESTED */15 fires every ~60-90 min in practice — this pill is the
+// honest view of that. Click opens the Actions page.
+function setCronPill(h) {
+  const el = $('pill-cron');
+  if (!el) return;
+  const c = h && (h.mode === 'github' ? h : h.cron); // github mode: the health object IS the cron info
+  const run = (c && c.ok && c.run) ? c.run : null;
+  if (!run) { if (!(c && c.rateLimited)) el.classList.add('hidden'); return; } // keep last known text through a rate-limit blip
+  el.classList.remove('hidden');
+  const when = run.startedAt || run.updatedAt;
+  const running = run.status && run.status !== 'completed';
+  if (running) el.textContent = `☁ cron running · started ${ago(when)}`;
+  else el.textContent = `☁ cron fired ${ago(when)}${run.conclusion === 'failure' ? ' · ⚠ failed' : ''}`;
+  el.classList.toggle('bad', run.conclusion === 'failure');
+
+  const recent = (c.recent || []).filter((r) => r.startedAt);
+  const lines = recent.slice(0, 6).map((r) => {
+    const state = (r.status && r.status !== 'completed') ? 'running'
+      : (r.conclusion === 'success' ? '✓' : (r.conclusion || '?'));
+    const dur = (r.updatedAt && r.startedAt && r.status === 'completed') ? ` · ${Math.max(1, Math.round((r.updatedAt - r.startedAt) / 60000))} min` : '';
+    return `• ${ago(r.startedAt)} — ${r.event === 'schedule' ? 'cron' : r.event} ${state}${dur}`;
+  }).join('\n');
+  // Measured cadence over the recent SCHEDULED fires (dispatch runs excluded — they're manual).
+  const sched = recent.filter((r) => r.event === 'schedule').map((r) => r.startedAt).sort((a, b) => b - a);
+  let cadence = '';
+  if (sched.length >= 3) {
+    const gaps = [];
+    for (let i = 0; i < sched.length - 1; i++) gaps.push(sched[i] - sched[i + 1]);
+    cadence = `\nMeasured cadence: a scheduled fire every ~${Math.round(gaps.reduce((a, b) => a + b, 0) / gaps.length / 60000)} min (requested */15 — GitHub deprioritizes public-repo crons).`;
+  }
+  el.title = `Cloud cron (GitHub Actions) — the runs that actually fired:\n${lines}${cadence}\nClick to open the Actions page.`;
+  el.dataset.url = run.url || (c.repo ? `https://github.com/${c.repo}/actions` : '');
+}
+
 async function refreshHealth() {
   if (scanning) { setServiceBadge(lastHealth); return; } // the scan owns the badge while it runs
   if (!hasApi) { setServiceBadge({ mode: 'demo' }); return; }
@@ -578,6 +616,7 @@ async function refreshHealth() {
   if (h && h.mode === 'github' && h.ok && h.run) lastGithubRun = h.run;
   lastHealth = h;
   setServiceBadge(h);
+  setCronPill(h);
 }
 
 // --- Sold-medians push badge -------------------------------------------------
@@ -934,6 +973,7 @@ window.addEventListener('DOMContentLoaded', () => {
   $('btn-refresh').addEventListener('click', () => { viewMode = 'cloud'; refresh(); refreshHealth(); });
   $('btn-settings').addEventListener('click', openSettings);
   $('svc-badge').addEventListener('click', () => { const u = $('svc-badge').dataset.url; if (u) openUrl(u); });
+  $('pill-cron').addEventListener('click', () => { const u = $('pill-cron').dataset.url; if (u) openUrl(u); });
   $('push-badge').addEventListener('click', retryPushClick);
   $('set-cancel').addEventListener('click', closeSettings);
   $('set-save').addEventListener('click', saveSettings);

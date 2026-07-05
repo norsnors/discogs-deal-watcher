@@ -194,6 +194,25 @@ async function getGems() {
 //     CDN, a different host, so this is the only api.github.com traffic — polled slowly to stay
 //     under the 60-req/hr unauthenticated limit).
 //   • Server mode — read the live /api/status sweep timestamp.
+const CRON_WORKFLOW = 'watch.yml'; // the sweep workflow file — health/cron info reads THIS workflow's runs only
+
+// Which GitHub repo hosts the cloud cron? Settings (github mode) first; failing that, a dev/owner
+// run can derive it from the local checkout's origin remote (the dashboard lives inside the watcher
+// repo) — that's what lets the cron pill work in the default local-scan mode with zero setup.
+let repoFromGit; // undefined = not probed yet; null = probed, none found
+async function cronRepo(s) {
+  const set = (s.githubRepo || '').trim().replace(/^https?:\/\/github\.com\//, '').replace(/\/+$/, '');
+  if (set) return set;
+  if (repoFromGit !== undefined) return repoFromGit;
+  if (app.isPackaged) { repoFromGit = null; return null; } // packaged installs have no checkout/remote
+  try {
+    const url = await git(['remote', 'get-url', 'origin'], 10_000);
+    const m = String(url).match(/github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?$/);
+    repoFromGit = m ? m[1] : null;
+  } catch { repoFromGit = null; }
+  return repoFromGit;
+}
+
 async function githubHealth(s) {
   const repo = (s.githubRepo || '').trim().replace(/^https?:\/\/github\.com\//, '').replace(/\/+$/, '');
   if (!repo) throw new Error('No GitHub repo (owner/name) set — open Settings.');
@@ -201,7 +220,10 @@ async function githubHealth(s) {
   try {
     const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
     if (s.githubToken) headers.authorization = 'Bearer ' + s.githubToken;
-    const res = await fetch(`https://api.github.com/repos/${repo}/actions/runs?per_page=1`, { headers, signal: to.signal });
+    // Scoped to the sweep workflow's runs (a build-mac run can't shadow the heartbeat), and a few of
+    // them: the extra runs feed the cron pill's fire history + real-cadence estimate at no extra
+    // request cost (still ONE api.github.com call per poll).
+    const res = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/${CRON_WORKFLOW}/runs?per_page=6`, { headers, signal: to.signal });
     // 403/429 with no remaining budget = the unauthenticated rate limit, NOT a real outage — say so
     // so the UI keeps the last-known state instead of falsely flipping to "down".
     if (res.status === 403 || res.status === 429) {
@@ -212,20 +234,17 @@ async function githubHealth(s) {
     if (res.status === 401) throw new Error('GitHub auth failed — check the access token in Settings.');
     if (!res.ok) throw new Error('GitHub HTTP ' + res.status);
     const j = await res.json();
-    const run = (j.workflow_runs || [])[0] || null;
-    if (!run) return { mode: 'github', repo, ok: true, run: null };
-    return {
-      mode: 'github', repo, ok: true,
-      run: {
-        startedAt: Date.parse(run.run_started_at || run.created_at) || null,
-        updatedAt: Date.parse(run.updated_at) || null,
-        status: run.status,         // queued | in_progress | completed
-        conclusion: run.conclusion, // success | failure | cancelled | null (while running)
-        url: run.html_url,
-        runNumber: run.run_number,
-        event: run.event,
-      },
-    };
+    const mapRun = (run) => ({
+      startedAt: Date.parse(run.run_started_at || run.created_at) || null,
+      updatedAt: Date.parse(run.updated_at) || null,
+      status: run.status,         // queued | in_progress | completed
+      conclusion: run.conclusion, // success | failure | cancelled | null (while running)
+      url: run.html_url,
+      runNumber: run.run_number,
+      event: run.event,           // schedule | workflow_dispatch | ...
+    });
+    const runs = (j.workflow_runs || []).map(mapRun);
+    return { mode: 'github', repo, ok: true, run: runs[0] || null, recent: runs };
   } finally { to.done(); }
 }
 
@@ -233,9 +252,17 @@ async function getServiceHealth() {
   const s = readSettings();
   const src = s.sourceType || 'scan';
   if (src === 'scan') {
-    // No cloud watcher in local-scan mode — the "service" is your own ⚡ Scan now.
+    // Local-scan mode: the "service" is your own ⚡ Scan now — but the OWNER's cloud cron still
+    // exists next door, so when a repo is derivable (settings, or the checkout's git remote) the
+    // cron heartbeat rides along for the topbar's cron pill. Best-effort: no repo / no network →
+    // plain local health, exactly as before.
     const last = lastScan();
-    return { mode: 'local', ok: true, lastScanAt: (last && last.ts) ? last.ts : null };
+    const out = { mode: 'local', ok: true, lastScanAt: (last && last.ts) ? last.ts : null };
+    try {
+      const repo = await cronRepo(s);
+      if (repo) out.cron = await githubHealth({ ...s, githubRepo: repo });
+    } catch { /* cron info is a bonus, never a failure */ }
+    return out;
   }
   if (src === 'server') {
     try { return { mode: 'server', ok: true, apiBase: s.apiBase, status: await serverGet(s, '/api/status') }; }

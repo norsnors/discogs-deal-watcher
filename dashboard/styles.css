@@ -46,6 +46,12 @@ body {
   padding: 4px 10px; border-radius: 999px; white-space: nowrap;
 }
 
+/* Cron pill: when the cloud email watcher's GitHub Actions cron last ACTUALLY fired (GitHub
+   deprioritizes public-repo crons, so this shows the real cadence). Click opens Actions. */
+.pill.cron { font: inherit; font-size: 12px; cursor: pointer; }
+.pill.cron:hover { background: #1c2531; }
+.pill.cron.bad { color: var(--red); border-color: #5b2b2b; font-weight: 600; }
+
 /* Sold-medians push badge: persists the outcome of the auto git-push that feeds the cloud emails.
    Green = synced; red = the push FAILED (stays until a push succeeds; click retries in place). */
 .pill.push { font: inherit; font-size: 12px; cursor: default; }
