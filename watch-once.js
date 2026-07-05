@@ -54,6 +54,14 @@ async function main() {
     if (restored) console.log(`Cache miss recovery: re-seeded warm-up/dedupe for ${restored} release(s) from state-seed.json.`);
   } catch { /* no seed committed yet, or cache already warm -> nothing to recover */ }
 
+  // Same recovery for the 💎 gem feed: if the Actions cache was evicted, state/gems.json is empty
+  // and this run would otherwise commit an EMPTY gems.json — erasing the dashboard's rare-gem
+  // history. The committed copy restores it (only into an empty store; the cache stays fresher).
+  try {
+    const g = JSON.parse(fs.readFileSync(path.join(__dirname, 'gems.json'), 'utf8'));
+    if (g && Array.isArray(g.gems)) store.primeGems(g.gems);
+  } catch { /* not committed yet */ }
+
   const client = makeClient({ token: config.token, userAgent: config.userAgent });
   const mailer = makeMailer(config.email);
   const sliceSize = config.sliceSize || 50;

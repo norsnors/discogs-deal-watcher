@@ -164,6 +164,13 @@ function makeStore(dir) {
     },
     getGems(limit = 100) { return gems.slice(0, limit); },
     countGems() { return gems.length; },
+    // Restore the gem feed from the committed root gems.json after an Actions-cache eviction —
+    // otherwise a wiped cache would publish an EMPTY gems.json and erase the dashboard's rare-gem
+    // history. Mirrors primeSoldMedians/primeSeed: in-memory only, and never overwrites a cache
+    // that already has gems (the cache is always the fresher copy).
+    primeGems(list) {
+      if (Array.isArray(list) && list.length && !gems.length) gems = list.slice(0, GEMS_CAP);
+    },
   };
 }
 
@@ -237,6 +244,13 @@ if (require.main === module && process.argv.includes('--selftest')) {
   assert.strictEqual(s2.lastObservation(100).numForSale, 6, 'recovered obs carry the last for-sale count');
   assert.strictEqual(s2.lastObservation(500).numForSale, 0, 'a zero-stock release recovers on nf alone (no price needed) — rare-gem watch survives a cache wipe');
   assert.ok(s2.listZeroStock().includes('500'), 'recovered zero-stock release is back on the watch list');
+
+  // primeGems restores the committed gem feed only into an EMPTY store (cache eviction recovery).
+  const s3 = makeStore(fs.mkdtempSync(path.join(os.tmpdir(), 'ddw-gems-')));
+  s3.primeGems([{ id: 'g9', releaseId: 9 }]);
+  assert.strictEqual(s3.getGems()[0].id, 'g9', 'an empty store recovers the committed gems');
+  s3.primeGems([{ id: 'gX', releaseId: 8 }]);
+  assert.strictEqual(s3.getGems()[0].id, 'g9', 'a store that already has gems is never overwritten');
 
   // primeSeed never clobbers a release the cache already has (cache is the fresher copy).
   s2.pushObservation(400, { ts: 9, lowest: 99, numForSale: 1 });
