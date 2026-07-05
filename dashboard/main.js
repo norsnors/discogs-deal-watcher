@@ -1001,6 +1001,152 @@ ipcMain.handle('medians:retryPush', async () => {
   return st;
 });
 
+// ---------------------------------------------------------------------------
+// ☁ Cloud setup — fork the watcher repo + configure it, all from inside the app.
+// ---------------------------------------------------------------------------
+// The 24/7 email watcher is "your own copy of the public repo, running on GitHub Actions".
+// Setting that up by hand is ~15 min of GitHub clicking (fork, five secrets, enable workflow,
+// first run) — this wizard does all of it through the GitHub API with a user-supplied token.
+// The Discogs credentials are reused from the local config.json (the first-run wizard already
+// collected them); the GitHub/Resend tokens are used here and stored ONLY as encrypted GitHub
+// Actions secrets on the user's own fork — never persisted locally.
+const UPSTREAM_REPO = 'norsnors/discogs-deal-watcher';
+
+async function ghReq(token, method, pathname, body) {
+  const to = withTimeout(20_000);
+  try {
+    const res = await fetch('https://api.github.com' + pathname, {
+      method,
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        authorization: 'Bearer ' + token,
+        ...(body ? { 'content-type': 'application/json' } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: to.signal,
+    });
+    let data = null;
+    try { data = await res.json(); } catch { /* 204s and error pages have no JSON body */ }
+    return { status: res.status, data };
+  } finally { to.done(); }
+}
+
+// GitHub Actions secrets are encrypted client-side with the repo's public key (libsodium sealed
+// box) — the API rejects plaintext. This is the documented flow from GitHub's own REST docs.
+async function encryptSecret(publicKeyB64, value) {
+  const sodium = require('libsodium-wrappers'); // lazy: only loaded when the wizard runs
+  await sodium.ready;
+  const key = sodium.from_base64(publicKeyB64, sodium.base64_variants.ORIGINAL);
+  const sealed = sodium.crypto_box_seal(sodium.from_string(value), key);
+  return sodium.to_base64(sealed, sodium.base64_variants.ORIGINAL);
+}
+
+let cloudSetupRunning = false;
+async function setupCloud(win, { githubToken, mailTo, resendKey } = {}) {
+  if (cloudSetupRunning) throw new Error('Cloud setup is already running.');
+  cloudSetupRunning = true;
+  const step = (id, state, detail) => { try { win.webContents.send('cloud:progress', { step: id, state, detail }); } catch { /* window gone */ } };
+  try {
+    githubToken = (githubToken || '').trim();
+    mailTo = (mailTo || '').trim();
+    resendKey = (resendKey || '').trim();
+    const cfg = readConfigFile();
+    if (!cfg.token || !cfg.username) throw new Error('Set up your Discogs account first (Settings → Discogs account), then run this again.');
+    if (!githubToken) throw new Error('Paste a GitHub token first.');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mailTo)) throw new Error('Enter the email address that should receive the alerts.');
+    if (!resendKey) throw new Error('Paste your Resend API key first.');
+
+    // 1. Verify both tokens up-front, so a typo fails here instead of as a broken cloud run later.
+    step('verify', 'busy');
+    const me = await ghReq(githubToken, 'GET', '/user');
+    if (me.status === 401) throw new Error('GitHub rejected the token (401) — generate a classic token with the "repo" and "workflow" scopes.');
+    if (me.status !== 200 || !me.data || !me.data.login) throw new Error('Could not reach GitHub (HTTP ' + me.status + ').');
+    const login = me.data.login;
+    const rkTo = withTimeout(15_000);
+    try {
+      const rk = await fetch('https://api.resend.com/domains', { headers: { authorization: 'Bearer ' + resendKey }, signal: rkTo.signal });
+      if (rk.status === 401 || rk.status === 403) throw new Error('Resend rejected the API key — create one at resend.com/api-keys and paste it exactly.');
+    } finally { rkTo.done(); }
+    step('verify', 'ok', 'GitHub: ' + login);
+
+    // 2. Fork. POST /forks is idempotent — if the fork already exists GitHub returns it, so
+    // re-running the wizard (after a half-finished attempt) just continues where it left off.
+    step('fork', 'busy');
+    const fk = await ghReq(githubToken, 'POST', `/repos/${UPSTREAM_REPO}/forks`, { default_branch_only: true });
+    if (fk.status !== 202 && fk.status !== 200) {
+      const msg = fk.data && fk.data.message ? ' — ' + fk.data.message : '';
+      throw new Error('Could not create your copy of the watcher repo (HTTP ' + fk.status + msg + ').');
+    }
+    const fork = fk.data.full_name; // usually <login>/discogs-deal-watcher; GitHub may suffix on a name clash
+    // Forking is async on GitHub's side — poll until the repo actually answers.
+    let ready = false;
+    for (let i = 0; i < 30 && !ready; i++) {
+      const r = await ghReq(githubToken, 'GET', '/repos/' + fork);
+      if (r.status === 200) ready = true;
+      else await sleep(3000);
+    }
+    if (!ready) throw new Error('Your copy (' + fork + ') did not become available in time — wait a minute and run the setup again (it continues where it stopped).');
+    step('fork', 'ok', fork);
+
+    // 3. Secrets. Actions on a fresh fork can take a moment to initialize — retry the public key.
+    step('secrets', 'busy');
+    await ghReq(githubToken, 'PUT', `/repos/${fork}/actions/permissions`, { enabled: true, allowed_actions: 'all' }).catch(() => { /* usually already enabled */ });
+    let pk = null;
+    for (let i = 0; i < 10 && !pk; i++) {
+      const r = await ghReq(githubToken, 'GET', `/repos/${fork}/actions/secrets/public-key`);
+      if (r.status === 200 && r.data && r.data.key) pk = r.data;
+      else await sleep(3000);
+    }
+    if (!pk) throw new Error('GitHub is still initializing Actions on your copy — wait a minute and run the setup again.');
+    const secrets = {
+      DISCOGS_USERNAME: cfg.username,
+      DISCOGS_TOKEN: cfg.token,
+      MAIL_TO: mailTo,
+      RESEND_API_KEY: resendKey,
+      // The user's own PAT doubles as the keepalive: its pushes count as user activity, which is
+      // what stops GitHub's 60-day auto-disable of the schedule (see watch.yml).
+      KEEPALIVE_PAT: githubToken,
+    };
+    for (const [name, value] of Object.entries(secrets)) {
+      const encrypted_value = await encryptSecret(pk.key, value);
+      const r = await ghReq(githubToken, 'PUT', `/repos/${fork}/actions/secrets/${name}`, { encrypted_value, key_id: pk.key_id });
+      if (r.status !== 201 && r.status !== 204) throw new Error('Could not store the ' + name + ' setting (HTTP ' + r.status + ').');
+    }
+    step('secrets', 'ok');
+
+    // 4. Switch the sweep on. Workflows in a fork start disabled; enable just ours, then fire the
+    // first run so the user sees it working (and gets the first email batch) without waiting for
+    // GitHub's (heavily delayed) schedule.
+    step('enable', 'busy');
+    let enabled = false; let lastStatus = 0;
+    for (let i = 0; i < 10 && !enabled; i++) {
+      const r = await ghReq(githubToken, 'PUT', `/repos/${fork}/actions/workflows/${CRON_WORKFLOW}/enable`);
+      lastStatus = r.status;
+      if (r.status === 204) enabled = true;
+      else await sleep(3000);
+    }
+    if (!enabled) throw new Error('Could not switch the cloud scan on (HTTP ' + lastStatus + ') — open github.com/' + fork + '/actions, click "Enable workflows", and run this setup again.');
+    const disp = await ghReq(githubToken, 'POST', `/repos/${fork}/actions/workflows/${CRON_WORKFLOW}/dispatches`, { ref: 'main' });
+    if (disp.status !== 204) throw new Error('Cloud scan is on, but starting the first run failed (HTTP ' + disp.status + ') — open github.com/' + fork + '/actions and press "Run workflow" once.');
+    step('enable', 'ok');
+
+    // 5. Point the dashboard's heartbeat (svc badge + ☁ cloud-scan pill) at the fork. The deal
+    // SOURCE deliberately stays the local scan — it is fresher and condition-confirmed; the fork's
+    // job is the 24/7 email. (cronRepo() reads settings.githubRepo first, so the pill lights up.)
+    writeSettings({ ...readSettings(), githubRepo: fork });
+    step('done', 'ok', fork);
+    return { ok: true, fork, url: `https://github.com/${fork}/actions` };
+  } finally {
+    cloudSetupRunning = false;
+  }
+}
+
+ipcMain.handle('cloud:setup', async (e, opts) => {
+  try { return await setupCloud(BrowserWindow.fromWebContents(e.sender), opts || {}); }
+  catch (err) { return { ok: false, error: err && err.message ? err.message : String(err) }; }
+});
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1120, height: 800, minWidth: 720, minHeight: 520,

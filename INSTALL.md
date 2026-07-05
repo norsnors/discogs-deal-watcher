@@ -93,13 +93,32 @@ developer `README.md`). Most people should leave it on **Local scan only**.
 
 ---
 
-## 5. Optional / advanced — email alerts
+## 5. Optional — 24/7 email alerts (built-in cloud setup)
 
-Local scanning shows deals while the app is open. If you want **email alerts** for new deals even
-when your PC is off, that requires running the cloud watcher service yourself (a free GitHub Actions
-cron). That's a developer setup — see `README.md` in the project for the full instructions
-(fork the repo, add `DISCOGS_TOKEN` / `DISCOGS_USERNAME` / `MAIL_TO` / `RESEND_API_KEY` as repo
-secrets). It's entirely optional; the desktop app works fully without it.
+Local scanning shows deals (and desktop notifications) while the app is open. If you also want
+**email alerts around the clock — even when your computer is off** — the app can set that up for
+you: it creates your own free copy of the watcher on GitHub and switches it on.
+
+Open **⚙ Settings → "Set up cloud alerts…"**. You need two free accounts (one-time, ~5 minutes):
+
+1. **GitHub** (runs the scans) — sign in at github.com, then click the wizard's token link. It opens
+   a "new token" page with the right access already ticked; press **Generate token** and paste the
+   result into the wizard.
+2. **Resend** (sends the emails) — sign up at resend.com (Google login works), go to **API Keys →
+   Create API key**, paste it into the wizard. Use the **same email address** for the alerts as you
+   signed up to Resend with — Resend's free sender only delivers to your own address, and the first
+   email may land in spam (mark it "not spam" once).
+
+Press **Set it up** and the app does the rest: it creates the copy, stores your settings encrypted
+on GitHub, switches the scan on, and starts the first run. The ☁ pill in the top bar then shows
+when your cloud watcher last ran. Notes:
+
+- Emails start after the watcher has seen your wantlist a few times (it learns normal prices first,
+  so you don't get flooded on day one).
+- GitHub runs free scheduled tasks roughly every 1–1.5 hours (it delays the requested schedule) —
+  that's the alert latency to expect.
+- It only ever **reads** Discogs and emails you; it never buys anything. Everything runs on your own
+  accounts; re-running the wizard is safe and just repairs/updates the setup.
 
 ---
 

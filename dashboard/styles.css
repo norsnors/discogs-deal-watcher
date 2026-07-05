@@ -288,6 +288,17 @@ button.ghost { background: transparent; color: var(--text); border: 1px solid va
 .test-result { font-size: 12px; min-height: 16px; margin-bottom: 12px; }
 .test-result.ok { color: var(--green); }
 .test-result.bad { color: var(--red); }
+.modal-card { max-height: 92vh; overflow-y: auto; }
+
+/* ☁ Cloud setup — the step checklist shown while the wizard works */
+.cloud-steps { list-style: none; margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; font-size: 12px; color: var(--muted); }
+.cloud-steps li { padding: 3px 0 3px 22px; position: relative; }
+.cloud-steps li::before { content: '○'; position: absolute; left: 2px; color: #5f6b7a; }
+.cloud-steps li.busy { color: var(--text); }
+.cloud-steps li.busy::before { content: '◔'; color: #e8c268; }
+.cloud-steps li.ok { color: var(--text); }
+.cloud-steps li.ok::before { content: '✓'; color: var(--green); }
+.cloud-steps li[data-detail]::after { content: ' — ' attr(data-detail); color: var(--muted); }
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 10px; }

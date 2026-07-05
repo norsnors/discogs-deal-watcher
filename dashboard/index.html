@@ -114,6 +114,9 @@
           <input type="password" id="set-token" placeholder="the DASHBOARD_TOKEN you set on the server" />
         </label>
       </div>
+      <label>24/7 email alerts <span class="opt">(cloud — works even when this app is closed)</span>
+        <button type="button" id="set-cloud-btn" class="ghost">Set up cloud alerts…</button>
+      </label>
       <label>Background scan while open <span class="opt">(keeps sold-medians + the email watcher fresh)</span>
         <select id="set-autoScan">
           <option value="0">Off</option>
@@ -131,6 +134,47 @@
         <span class="spacer"></span>
         <button id="set-cancel" class="ghost">Cancel</button>
         <button id="set-save" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ☁ Cloud setup wizard: fork + configure the 24/7 email watcher on the user's own GitHub -->
+  <div id="cloud-modal" class="modal hidden">
+    <div class="modal-card">
+      <h2>☁ 24/7 email alerts</h2>
+      <p class="hint">Get deal emails around the clock — even when this app is closed. The app creates
+        your own free copy of the watcher on <b>GitHub</b> and switches it on for you. You need two free
+        accounts: <b>GitHub</b> (runs the scans) and <b>Resend</b> (sends the emails). One-time, ~5 minutes.</p>
+      <label>GitHub token
+        <input type="password" id="cloud-github" placeholder="paste a GitHub token here" autocomplete="off" spellcheck="false" />
+      </label>
+      <p class="hint">
+        <a href="#" id="cloud-github-help">Create the token (pre-filled, just press Generate) →</a><br />
+        Sign in to GitHub first; the link opens a new-token page with the right access ("repo" + "workflow") already ticked.
+      </p>
+      <label>Email address for the alerts
+        <input type="text" id="cloud-mailto" placeholder="you@example.com" autocomplete="off" spellcheck="false" />
+      </label>
+      <label>Resend API key
+        <input type="password" id="cloud-resend" placeholder="re_…" autocomplete="off" spellcheck="false" />
+      </label>
+      <p class="hint">
+        <a href="#" id="cloud-resend-help">Get a free Resend API key →</a><br />
+        Sign up at resend.com (Google login works), then <b>API Keys → Create API key</b>. Use the <b>same
+        email address</b> above as you signed up with — Resend's free sender only delivers to your own address.
+      </p>
+      <ol id="cloud-steps" class="cloud-steps hidden">
+        <li data-step="verify">Check GitHub + Resend access</li>
+        <li data-step="fork">Create your own copy of the watcher</li>
+        <li data-step="secrets">Store your settings (encrypted)</li>
+        <li data-step="enable">Switch it on + start the first scan</li>
+      </ol>
+      <div id="cloud-result" class="test-result"></div>
+      <div class="modal-actions">
+        <button id="cloud-open-btn" class="ghost hidden">View it on GitHub</button>
+        <span class="spacer"></span>
+        <button id="cloud-cancel" class="ghost">Close</button>
+        <button id="cloud-run" class="primary">Set it up</button>
       </div>
     </div>
   </div>

@@ -27,13 +27,32 @@
       "assets/**/*"
     ],
     "extraResources": [
-      { "from": "../engine.js", "to": "watcher/engine.js" },
-      { "from": "../discogs.js", "to": "watcher/discogs.js" },
-      { "from": "../store.js", "to": "watcher/store.js" },
-      { "from": "../watcher.js", "to": "watcher/watcher.js" }
+      {
+        "from": "../engine.js",
+        "to": "watcher/engine.js"
+      },
+      {
+        "from": "../discogs.js",
+        "to": "watcher/discogs.js"
+      },
+      {
+        "from": "../store.js",
+        "to": "watcher/store.js"
+      },
+      {
+        "from": "../watcher.js",
+        "to": "watcher/watcher.js"
+      }
     ],
     "win": {
-      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "icon": "assets/icon.ico"
     },
     "nsis": {
@@ -46,7 +65,14 @@
       "artifactName": "Discogs-Deal-Watcher-Setup-${version}.${ext}"
     },
     "mac": {
-      "target": [{ "target": "dmg", "arch": ["universal"] }],
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
       "category": "public.app-category.music",
       "icon": "assets/icon.icns"
     },
@@ -57,5 +83,8 @@
   "devDependencies": {
     "electron": "^31.0.0",
     "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "libsodium-wrappers": "^0.8.4"
   }
 }

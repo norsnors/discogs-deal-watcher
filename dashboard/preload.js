@@ -21,6 +21,14 @@ contextBridge.exposeInMainWorld('api', {
   // Sold-medians git push: last persisted outcome (null = badge hidden) + a manual retry.
   getPushStatus: () => ipcRenderer.invoke('medians:pushStatus'),
   retryPush: () => ipcRenderer.invoke('medians:retryPush'),
+  // ☁ Cloud setup: fork the watcher repo + configure the 24/7 email watcher on the user's own
+  // GitHub account. Tokens are used transiently; progress streams via cloud:progress.
+  cloudSetup: (opts) => ipcRenderer.invoke('cloud:setup', opts),
+  onCloudProgress: (cb) => {
+    const h = (_e, m) => cb(m);
+    ipcRenderer.on('cloud:progress', h);
+    return () => ipcRenderer.removeListener('cloud:progress', h);
+  },
   onScrapeProgress: (cb) => {
     const h = (_e, m) => cb(m);
     ipcRenderer.on('scrape:progress', h);

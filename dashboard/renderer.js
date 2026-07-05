@@ -929,6 +929,84 @@ async function wizardSave() {
   startScan();
 }
 
+// --- ☁ Cloud setup wizard (24/7 email alerts on the user's own GitHub fork) ---
+let cloudRunning = false;
+
+function cloudResetSteps() {
+  document.querySelectorAll('#cloud-steps li').forEach((li) => { li.className = ''; li.removeAttribute('data-detail'); });
+}
+
+async function openCloud() {
+  closeSettings();
+  cloudResetSteps();
+  $('cloud-steps').classList.add('hidden');
+  $('cloud-open-btn').classList.add('hidden');
+  $('cloud-result').textContent = ''; $('cloud-result').className = 'test-result';
+  $('cloud-run').disabled = false;
+  // Prefill the alert address from an earlier attempt is not possible (tokens are never stored) —
+  // but a missing Discogs account is a hard prerequisite, so surface that immediately.
+  if (hasApi) {
+    try {
+      const c = await window.api.getConfig();
+      if (!c || !c.hasToken || !c.username) {
+        $('cloud-result').textContent = 'Set up your Discogs account first (Settings → Discogs account) — the cloud watcher scans that wantlist.';
+        $('cloud-result').className = 'test-result bad';
+        $('cloud-run').disabled = true;
+      }
+    } catch { /* leave enabled; the main process re-checks anyway */ }
+  }
+  $('cloud-modal').classList.remove('hidden');
+  $('cloud-github').focus();
+}
+function closeCloud() { if (!cloudRunning) $('cloud-modal').classList.add('hidden'); }
+
+function onCloudProgress(m) {
+  if (!m || !m.step) return;
+  const li = document.querySelector(`#cloud-steps li[data-step="${m.step}"]`);
+  if (!li) return;
+  li.className = m.state === 'ok' ? 'ok' : m.state === 'busy' ? 'busy' : '';
+  if (m.detail) li.setAttribute('data-detail', m.detail);
+}
+
+async function runCloudSetup() {
+  if (cloudRunning) return;
+  const el = $('cloud-result');
+  if (!hasApi) { el.textContent = 'Demo mode (no Electron bridge).'; return; }
+  cloudRunning = true;
+  $('cloud-run').disabled = true;
+  cloudResetSteps();
+  $('cloud-steps').classList.remove('hidden');
+  el.textContent = 'Setting up — this takes a minute or two…'; el.className = 'test-result';
+  try {
+    const r = await window.api.cloudSetup({
+      githubToken: $('cloud-github').value,
+      mailTo: $('cloud-mailto').value,
+      resendKey: $('cloud-resend').value,
+    });
+    if (r && r.ok) {
+      el.textContent = `✓ Done! Your cloud watcher (${r.fork}) is live and running its first scan now. `
+        + 'Deal emails start arriving after it has watched your wantlist for a few scans (it learns normal prices first). '
+        + 'GitHub runs it roughly every 1–1.5 hours. Check your spam folder for the first email.';
+      el.className = 'test-result ok';
+      const btn = $('cloud-open-btn');
+      btn.classList.remove('hidden');
+      btn.dataset.url = r.url;
+      $('cloud-github').value = ''; $('cloud-resend').value = ''; // tokens are never kept around
+      refreshHealth(); // light up the ☁ pill / badge against the fresh fork
+    } else {
+      el.textContent = (r && r.error) || 'Setup failed.';
+      el.className = 'test-result bad';
+      $('cloud-run').disabled = false;
+    }
+  } catch (e) {
+    el.textContent = 'Setup failed: ' + e.message;
+    el.className = 'test-result bad';
+    $('cloud-run').disabled = false;
+  } finally {
+    cloudRunning = false;
+  }
+}
+
 // Decide what to show on launch: the first-run wizard if there are no Discogs creds, otherwise the
 // configured deal source ('scan' by default).
 async function boot() {
@@ -980,6 +1058,15 @@ window.addEventListener('DOMContentLoaded', () => {
   $('set-test-btn').addEventListener('click', testConnection);
   $('set-sourceType').addEventListener('change', toggleSrc);
   $('set-account-btn').addEventListener('click', () => { closeSettings(); openWizard(false); });
+
+  // ☁ Cloud setup wizard
+  $('set-cloud-btn').addEventListener('click', openCloud);
+  $('cloud-cancel').addEventListener('click', closeCloud);
+  $('cloud-run').addEventListener('click', runCloudSetup);
+  $('cloud-open-btn').addEventListener('click', () => { const u = $('cloud-open-btn').dataset.url; if (u) openUrl(u); });
+  $('cloud-github-help').addEventListener('click', (e) => { e.preventDefault(); openUrl('https://github.com/settings/tokens/new?scopes=repo,workflow&description=Discogs%20Deal%20Watcher%20cloud'); });
+  $('cloud-resend-help').addEventListener('click', (e) => { e.preventDefault(); openUrl('https://resend.com/api-keys'); });
+  if (hasApi) window.api.onCloudProgress(onCloudProgress);
 
   // Wizard
   $('wiz-test-btn').addEventListener('click', wizardTest);
