@@ -585,8 +585,8 @@ function setCronPill(h) {
   el.classList.remove('hidden');
   const when = run.startedAt || run.updatedAt;
   const running = run.status && run.status !== 'completed';
-  if (running) el.textContent = `☁ cron running · started ${ago(when)}`;
-  else el.textContent = `☁ cron fired ${ago(when)}${run.conclusion === 'failure' ? ' · ⚠ failed' : ''}`;
+  if (running) el.textContent = `☁ cloud scan running · started ${ago(when)}`;
+  else el.textContent = `☁ cloud scan ran ${ago(when)}${run.conclusion === 'failure' ? ' · ⚠ failed' : ''}`;
   el.classList.toggle('bad', run.conclusion === 'failure');
 
   const recent = (c.recent || []).filter((r) => r.startedAt);
@@ -594,17 +594,17 @@ function setCronPill(h) {
     const state = (r.status && r.status !== 'completed') ? 'running'
       : (r.conclusion === 'success' ? '✓' : (r.conclusion || '?'));
     const dur = (r.updatedAt && r.startedAt && r.status === 'completed') ? ` · ${Math.max(1, Math.round((r.updatedAt - r.startedAt) / 60000))} min` : '';
-    return `• ${ago(r.startedAt)} — ${r.event === 'schedule' ? 'cron' : r.event} ${state}${dur}`;
+    return `• ${ago(r.startedAt)} — ${r.event === 'schedule' ? 'auto' : 'manual'} ${state}${dur}`;
   }).join('\n');
-  // Measured cadence over the recent SCHEDULED fires (dispatch runs excluded — they're manual).
+  // Measured cadence over the recent SCHEDULED runs (manual/dispatch runs excluded).
   const sched = recent.filter((r) => r.event === 'schedule').map((r) => r.startedAt).sort((a, b) => b - a);
   let cadence = '';
   if (sched.length >= 3) {
     const gaps = [];
     for (let i = 0; i < sched.length - 1; i++) gaps.push(sched[i] - sched[i + 1]);
-    cadence = `\nMeasured cadence: a scheduled fire every ~${Math.round(gaps.reduce((a, b) => a + b, 0) / gaps.length / 60000)} min (requested */15 — GitHub deprioritizes public-repo crons).`;
+    cadence = `\nRuns automatically every ~${Math.round(gaps.reduce((a, b) => a + b, 0) / gaps.length / 60000)} min in practice (GitHub delays the requested 15-min schedule on free repos).`;
   }
-  el.title = `Cloud cron (GitHub Actions) — the runs that actually fired:\n${lines}${cadence}\nClick to open the Actions page.`;
+  el.title = `Cloud scan — the watcher on GitHub that sweeps your wantlist and emails deals. Recent runs:\n${lines}${cadence}\nClick to open the run on GitHub.`;
   el.dataset.url = run.url || (c.repo ? `https://github.com/${c.repo}/actions` : '');
 }
 
