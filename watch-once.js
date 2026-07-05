@@ -19,7 +19,7 @@ const engine = require('./engine');
 const { makeClient } = require('./discogs');
 const { makeStore } = require('./store');
 const { makeMailer } = require('./mailer');
-const { processRelease, loadConfig } = require('./watcher');
+const { processRelease, loadConfig, zeroWatch } = require('./watcher');
 
 const STATE_DIR = path.join(__dirname, 'state');
 const cursorFile = () => path.join(STATE_DIR, 'cursor.json');
@@ -74,7 +74,7 @@ async function main() {
     console.log(`Refreshed wantlist: ${cur.wantlist.length} releases.`);
   }
   const N = cur.wantlist.length;
-  if (!N) { console.log('Empty wantlist — nothing to do.'); writeCursor(cur); publishDeals(store); return; }
+  if (!N) { console.log('Empty wantlist — nothing to do.'); writeCursor(cur); publishDeals(store, cur.wantlist); return; }
 
   const now = Date.now();
   const take = Math.min(sliceSize, N);
@@ -91,23 +91,37 @@ async function main() {
   console.log(`Sweeping the ${slice.length} highest-priority of ${N} (mode=${config.mode}, email=${mailer.enabled ? mailer.provider : 'off'}).`);
 
   const deals = [];
+  const gems = []; // 💎 rare appearances (0 for sale -> first copy) — emailed regardless of price
   let checked = 0;
   for (const rel of slice) {
     try {
-      const d = await processRelease(rel, { client, store, engine, config });
-      if (d) deals.push(d);
+      const { deal, gem } = await processRelease(rel, { client, store, engine, config });
+      if (deal) deals.push(deal);
+      if (gem) gems.push(gem);
       checked++;
     } catch (e) { console.log(`  release ${rel.releaseId} error: ${e.message}`); }
   }
 
   const sweepsToCover = Math.ceil(N / take);
-  console.log(`Checked ${checked}. Deals this run: ${deals.length}. (Full wantlist covered every ~${sweepsToCover} runs.)`);
+  console.log(`Checked ${checked}. Deals this run: ${deals.length}. Rare gems: ${gems.length}. (Full wantlist covered every ~${sweepsToCover} runs.)`);
 
   // Lead with the strongest diamond: the email subject + first card come from deals[0], so order
   // best-first (just-listed + real-sold-price + biggest discount rank highest).
   deals.sort((a, b) => engine.dealValueScore(b) - engine.dealValueScore(a));
 
   let emailError = null;
+  // 💎 Gems first — the rare-appearance email is the most time-critical alert there is (a truly
+  // rare copy can sell within the hour), and it's sent SEPARATELY from the deals email so the
+  // subject line screams the event even when this sweep also found ordinary price deals.
+  if (gems.length) {
+    for (const g of gems) console.log(`  GEM 💎 ${g.artist} – ${g.title}  first copy for sale at ${g.currency} ${g.lowest} (was 0 for sale)`);
+    if (mailer.enabled) {
+      try { await mailer.sendGems(gems); console.log(`Emailed ${gems.length} rare gem(s) to ${config.email.to}.`); }
+      catch (e) { emailError = e; console.log('Gem email FAILED:', e.message); }
+    } else {
+      console.log('Email disabled — gems saved for the dashboard.');
+    }
+  }
   if (deals.length) {
     for (const d of deals) console.log(`  DEAL${d.freshListing ? ' 🆕just-listed' : ''} ${d.artist} – ${d.title}  ${d.currency} ${d.lowest} (${Math.round(d.discount * 100)}% off${d.suspicious ? ', ⚠maybe<VG+' : ''})`);
     if (mailer.enabled) {
@@ -118,7 +132,7 @@ async function main() {
     }
   }
 
-  publishDeals(store);
+  publishDeals(store, cur.wantlist);
 
   // Turn a silent email failure into a LOUD one: exit non-zero so the GitHub Actions step fails and
   // GitHub's built-in "your workflow failed" notification reaches you. For a tool whose core output IS
@@ -127,12 +141,17 @@ async function main() {
   if (emailError) { console.error('Exiting non-zero because the deal email failed to send.'); process.exit(1); }
 }
 
-// Write deals.json (for the dashboard) + state-seed.json (durable warm-up/dedupe backup) at the repo
-// root; the workflow commits both. The seed is a tiny digest that's stable run-to-run once releases
-// warm up, so it adds almost no git churn — but it lets a future run rebuild warm-up + dedupe if the
-// Actions cache is ever evicted (the cache is the only other place that state lives).
-function publishDeals(store) {
+// Write deals.json + gems.json (for the dashboard) + state-seed.json (durable warm-up/dedupe backup)
+// at the repo root; the workflow commits all three. The seed is a tiny digest that's stable
+// run-to-run once releases warm up, so it adds almost no git churn — but it lets a future run rebuild
+// warm-up + dedupe if the Actions cache is ever evicted (the cache is the only other place that state
+// lives). gems.json also carries the zero-stock WATCH list (wantlist releases with 0 copies for sale)
+// so the dashboard's 💎 tab can show what's being waited on, not just what already appeared.
+function publishDeals(store, wantlist) {
   fs.writeFileSync(path.join(__dirname, 'deals.json'), JSON.stringify(store.getDeals(200)));
+  try {
+    fs.writeFileSync(path.join(__dirname, 'gems.json'), JSON.stringify({ ts: Date.now(), gems: store.getGems(100), zeroWatch: zeroWatch(store, wantlist) }));
+  } catch (e) { console.log('Could not write gems.json:', e.message); }
   try { fs.writeFileSync(path.join(__dirname, 'state-seed.json'), JSON.stringify(store.exportSeed())); }
   catch (e) { console.log('Could not write state-seed.json:', e.message); }
 }

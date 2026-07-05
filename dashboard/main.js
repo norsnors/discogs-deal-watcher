@@ -108,10 +108,11 @@ async function serverGet(s, pathname) {
   } finally { to.done(); }
 }
 
-// GitHub mode (watch-once.js via Actions): read the committed deals.json.
+// GitHub mode (watch-once.js via Actions): read a committed JSON file (deals.json / gems.json).
 //  - public repo (no token): raw CDN — no auth, no 60-req/hour API limit.
 //  - private repo (token):   authenticated Contents API.
-async function githubDeals(s) {
+// Returns null when the file isn't committed yet (nothing found so far).
+async function githubFile(s, name) {
   const repo = (s.githubRepo || '').trim().replace(/^https?:\/\/github\.com\//, '').replace(/\/+$/, '');
   if (!repo) throw new Error('No GitHub repo (owner/name) set — open Settings.');
   const branch = (s.githubBranch || 'main').trim();
@@ -119,21 +120,22 @@ async function githubDeals(s) {
   try {
     let res;
     if (s.githubToken) {
-      res = await fetch(`https://api.github.com/repos/${repo}/contents/deals.json?ref=${branch}`, {
+      res = await fetch(`https://api.github.com/repos/${repo}/contents/${name}?ref=${branch}`, {
         headers: { Accept: 'application/vnd.github.raw', authorization: 'Bearer ' + s.githubToken },
         signal: to.signal,
       });
     } else {
-      res = await fetch(`https://raw.githubusercontent.com/${repo}/${branch}/deals.json?t=${Date.now()}`, {
+      res = await fetch(`https://raw.githubusercontent.com/${repo}/${branch}/${name}?t=${Date.now()}`, {
         cache: 'no-store', signal: to.signal,
       });
     }
-    if (res.status === 404) return []; // not committed yet (no deals so far)
+    if (res.status === 404) return null; // not committed yet
     if (res.status === 401 || res.status === 403) throw new Error('GitHub auth failed — check the access token in Settings.');
     if (!res.ok) throw new Error('GitHub HTTP ' + res.status);
     return await res.json();
   } finally { to.done(); }
 }
+const githubDeals = async (s) => (await githubFile(s, 'deals.json')) || [];
 
 async function getDeals(limit) {
   const s = readSettings();
@@ -151,6 +153,26 @@ async function getStatus() {
   if (src === 'github') return { sourceType: 'github', repo: s.githubRepo };
   const last = lastScan();
   return { sourceType: 'scan', wantlistSize: (last && last.wantlistTotal != null) ? last.wantlistTotal : '—' };
+}
+
+// 💎 Rare gems (0-for-sale -> first copy) + the zero-stock watch list, for the dashboard's Rare tab.
+// Shape everywhere: { ts, gems: [...], zeroWatch: [...] }.
+//   • github — the committed gems.json (written by watch-once.js next to deals.json).
+//   • server — the live /api/gems endpoint.
+//   • scan   — the LOCAL store's accumulated gems (state/gems.json, appended by runScrape) + the
+//              zero-stock watch list saved with the last scan.
+async function getGems() {
+  const s = readSettings();
+  const src = s.sourceType || 'scan';
+  if (src === 'server') return serverGet(s, '/api/gems?limit=100');
+  if (src === 'github') {
+    const g = await githubFile(s, 'gems.json');
+    return g && typeof g === 'object' ? { ts: g.ts || null, gems: g.gems || [], zeroWatch: g.zeroWatch || [] } : { ts: null, gems: [], zeroWatch: [] };
+  }
+  let gems = [];
+  try { gems = JSON.parse(fs.readFileSync(path.join(stateDir(), 'gems.json'), 'utf8')).slice(0, 100); } catch { /* no gems yet */ }
+  const last = lastScan();
+  return { ts: last ? last.ts : null, gems, zeroWatch: (last && last.zeroWatch) || [] };
 }
 
 // ---------------------------------------------------------------------------
@@ -227,6 +249,7 @@ async function getServiceHealth() {
 let scrapeAbort = false;
 let scrapeRunning = false;
 const SUGGESTION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const RARE_COOLDOWN_MS = 12 * 60 * 60 * 1000; // per-release cooldown between rare-gem alerts (mirrors the cloud watcher)
 const QUICK_SCAN_SIZE = 250; // a quick scan checks only the top-N highest-priority releases (by watch-score)
 const LAST_SCAN_FILE = () => path.join(app.getPath('userData'), 'last-scan.json');
 
@@ -674,6 +697,7 @@ async function runScrape(win, opts = {}) {
       }
     })();
 
+    const gemsFound = []; // 💎 rare appearances (0 -> first copy) detected during THIS scan
     for (const rel of work) {
       if (scrapeAbort) break;
       try {
@@ -681,6 +705,34 @@ async function runScrape(win, opts = {}) {
         const prevObs = store.lastObservation(rel.releaseId);
         const curObs = { ts: Date.now(), lowest: stats.lowestPrice, numForSale: stats.numForSale };
         store.pushObservation(rel.releaseId, curObs);
+
+        // 💎 Rare gem: this release had ZERO copies for sale and just got its first — recorded
+        // regardless of price (availability is the signal). Same cooldown dedupe as the cloud
+        // watcher, but against the LOCAL state (the two keep independent histories, so the cloud
+        // still emails the same event on its own next sweep).
+        if (engine.isRareAppearance(prevObs, curObs)) {
+          const ra = store.getRareAlerted(rel.releaseId);
+          if (!ra || Date.now() - ra.ts > RARE_COOLDOWN_MS) {
+            const sm = store.getSoldMedian(rel.releaseId);
+            const sug0 = store.getSuggestion(rel.releaseId);
+            const refSource = sm && sm.median != null ? 'sold-median' : (sug0 && sug0.vgplus != null ? 'suggestion' : null);
+            const gem = {
+              id: `${rel.releaseId}-gem-${Date.now()}`,
+              type: 'gem',
+              releaseId: rel.releaseId, title: rel.title, artist: rel.artist, year: rel.year, thumb: rel.thumb,
+              lowest: stats.lowestPrice, currency: stats.currency || config.currency,
+              numForSale: stats.numForSale,
+              reference: refSource === 'sold-median' ? sm.median : (refSource === 'suggestion' ? sug0.vgplus : null),
+              referenceSource: refSource,
+              url: marketUrl(rel.releaseId),
+              releaseUrl: engine.releaseUrl(rel.releaseId),
+              ts: Date.now(),
+            };
+            store.addGem(gem);
+            store.setRareAlerted(rel.releaseId, { ts: Date.now(), numForSale: stats.numForSale });
+            gemsFound.push(gem);
+          }
+        }
 
         if (stats.numForSale > 0 && stats.lowestPrice != null) {
           let sug = store.getSuggestion(rel.releaseId);
@@ -750,7 +802,16 @@ async function runScrape(win, opts = {}) {
     const missRank = (m) => (m.reasonCode === 'vgplus-not-cheap' ? 0 : m.reasonCode === 'unconfirmed-not-cheap' ? 1 : 2);
     nearMisses.sort((a, b) => missRank(a) - missRank(b) || ((b.effectiveDiscount ?? b.discount ?? 0) - (a.effectiveDiscount ?? a.discount ?? 0)));
     const nearMissOut = nearMisses.slice(0, 250);
-    try { fs.writeFileSync(LAST_SCAN_FILE(), JSON.stringify({ ts: Date.now(), deals, nearMisses: nearMissOut })); } catch { /* best effort */ }
+
+    // 💎 zero-stock watch list: wantlist releases whose LATEST observation counted ZERO copies for
+    // sale — the rarities the 💎 tab shows as "being watched". Computed against the FULL wantlist
+    // (the store keeps knowledge from earlier scans, so a quick scan doesn't shrink the list).
+    const zeroIds = new Set(store.listZeroStock());
+    const zeroWatchOut = wantlist
+      .filter((r) => zeroIds.has(String(r.releaseId)))
+      .map((r) => ({ releaseId: r.releaseId, title: r.title, artist: r.artist, year: r.year, thumb: r.thumb }));
+
+    try { fs.writeFileSync(LAST_SCAN_FILE(), JSON.stringify({ ts: Date.now(), deals, nearMisses: nearMissOut, gems: gemsFound, zeroWatch: zeroWatchOut })); } catch { /* best effort */ }
 
     // Export the accumulated REAL sales-history medians to a committable root file so the cloud email
     // watcher can judge deals against true market value. The store keeps them in the gitignored
@@ -784,8 +845,8 @@ async function runScrape(win, opts = {}) {
       }
     }
 
-    send({ phase: 'done', checked: total, total, found: deals.length, confirmed, droppedNoVgPlus, unconfirmed, realShip, nearMisses: nearMissOut.length, warmedReal, warmedChecked, soldMediansExported, mediansPush, aborted: scrapeAbort, quick: !!opts.quick, fullMedians: !!opts.fullMedians, wantlistTotal });
-    return { deals, nearMisses: nearMissOut, checked: total, total, confirmed, droppedNoVgPlus, unconfirmed, realShip, warmedReal, warmedChecked, aborted: scrapeAbort, quick: !!opts.quick, fullMedians: !!opts.fullMedians, wantlistTotal };
+    send({ phase: 'done', checked: total, total, found: deals.length, gems: gemsFound.length, zeroWatch: zeroWatchOut.length, confirmed, droppedNoVgPlus, unconfirmed, realShip, nearMisses: nearMissOut.length, warmedReal, warmedChecked, soldMediansExported, mediansPush, aborted: scrapeAbort, quick: !!opts.quick, fullMedians: !!opts.fullMedians, wantlistTotal });
+    return { deals, nearMisses: nearMissOut, gems: gemsFound, zeroWatch: zeroWatchOut, checked: total, total, confirmed, droppedNoVgPlus, unconfirmed, realShip, warmedReal, warmedChecked, aborted: scrapeAbort, quick: !!opts.quick, fullMedians: !!opts.fullMedians, wantlistTotal };
   } finally {
     scrapeRunning = false;
     if (cfWin) { try { cfWin.destroy(); } catch { /* already gone */ } }
@@ -855,6 +916,7 @@ ipcMain.handle('config:test', (_e, creds) => testConfig(creds || {}));
 ipcMain.handle('settings:get', () => readSettings());
 ipcMain.handle('settings:set', (_e, s) => { writeSettings(s); return true; });
 ipcMain.handle('deals:get', (_e, limit) => getDeals(limit));
+ipcMain.handle('gems:get', () => getGems());
 ipcMain.handle('status:get', () => getStatus());
 ipcMain.handle('health:get', () => getServiceHealth());
 ipcMain.handle('open:external', (_e, url) => { if (/^https?:\/\//.test(url)) shell.openExternal(url); });

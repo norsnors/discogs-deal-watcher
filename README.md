@@ -84,6 +84,32 @@ The whole point is to grab a bargain before someone else does, so the watcher is
   coverage over time. At `SLICE_SIZE=200`, 715 releases are fully covered every ~4 runs (~1 h) and
   hot ones every run.
 
+### 💎 Rare gems — "there was NOTHING for sale, and now there is"
+
+For a truly hard-to-find record the question isn't "is it cheap?" but "**is there finally a copy at
+all?**". So next to the price-gated deal alerts there's a second, **price-blind** alert:
+
+- **The event.** A wantlist release whose previous check counted **`num_for_sale = 0`** suddenly has
+  ≥1 copy (`engine.isRareAppearance` — stricter than `isFreshListing`: the previous count must be a
+  *known zero*). When it fires you get a separate **💎 email immediately, whatever the asking price**
+  (`renderGemsEmail`), because a rare copy can sell within the hour. The email shows the asking price
+  plainly plus the reference value (sold-median / VG+ suggestion) as context only.
+- **No warm-up, only a cooldown.** The one prior observation *is* the warm-up (we knew it was at
+  zero). The only gate is a 12 h per-release cooldown (`rareCooldownMs`) so a count flapping 0↔1 on
+  Discogs' side can't re-fire the same copy every sweep; a copy that appears, sells, and is re-listed
+  later alerts again — a genuinely new chance. Disable the whole feature with `rareGems: false` /
+  `RARE_GEMS=0` (default on).
+- **Zero-stock releases are watched hardest.** `releaseWatchScore` ranks `num_for_sale = 0` as the
+  rarest of all, so if the wantlist ever outgrows `SLICE_SIZE` the zero-stock releases still get
+  checked every run. The "was at zero" knowledge also survives an Actions-cache wipe (the committed
+  `state-seed.json` carries each release's last count, `nf`).
+- **Dashboard: the 💎 Rare gems tab.** Gem alerts render as violet cards, and below them the
+  **zero-stock watch list** — every wantlist release currently at 0 copies for sale — so you can see
+  what's being waited on. The cloud publishes both in a committed **`gems.json`** (next to
+  `deals.json`); the local `⚡ Scan now` detects 0→1 itself too (against its own local history) and
+  feeds the same tab. Deal sliders don't apply on this tab (availability is the signal, not price);
+  only the search box filters.
+
 ### Finding the real diamonds (not 250 cheap commons)
 
 A flat "≥50% off" rule on a 715-release wantlist surfaced ~250 hits — mostly cheap records where a

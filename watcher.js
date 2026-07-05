@@ -30,6 +30,9 @@ const DEFAULTS = {
   mode: 'balanced',     // 'balanced' | 'sensitive' | 'strict' (see engine.shouldFire)
   ownDropFactor: 0.4,   // balanced/strict: how far under its OWN usual lowest a copy must dip
   warmupMin: 4,         // observations before a release can alert (learns its floor first)
+  rareGems: true,       // 💎 alert when a release with ZERO copies for sale gets its first one (price-blind)
+  rareCooldownMs: 12 * 60 * 60 * 1000, // per-release cooldown between rare-gem alerts (guards against
+                        //   num_for_sale flapping 0<->1 on Discogs' side re-firing the same copy)
   trailingN: 30,
   wantlistRefreshMs: 6 * 60 * 60 * 1000,
   dashboardPort: 8787,
@@ -54,6 +57,7 @@ function loadConfig(configPath) {
     minReference: env.MIN_REFERENCE ? parseFloat(env.MIN_REFERENCE) : (file.minReference ?? DEFAULTS.minReference),
     shippingEstimate: env.SHIPPING_ESTIMATE ? parseFloat(env.SHIPPING_ESTIMATE) : (file.shippingEstimate ?? DEFAULTS.shippingEstimate),
     mode: env.MODE || file.mode || DEFAULTS.mode,
+    rareGems: env.RARE_GEMS != null ? !/^(0|false|off)$/i.test(env.RARE_GEMS) : (file.rareGems ?? DEFAULTS.rareGems),
     dashboardPort: env.PORT ? parseInt(env.PORT, 10) : (env.DASHBOARD_PORT ? parseInt(env.DASHBOARD_PORT, 10) : (file.dashboardPort ?? DEFAULTS.dashboardPort)),
     dashboardToken: env.DASHBOARD_TOKEN || file.dashboardToken || '',
     sliceSize: env.SLICE_SIZE ? parseInt(env.SLICE_SIZE, 10) : (file.sliceSize || 50),
@@ -78,8 +82,21 @@ function loadConfig(configPath) {
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Process ONE release: fetch stats, update history, refresh suggestion if stale,
-// evaluate, and (if a new-low deal) record + return the deal. Pure of the loop, so testable.
+// The rarities we're waiting on: wantlist releases whose LATEST observation counted ZERO copies
+// for sale — the 💎 watch list the dashboard shows. History only stores ids, so join with the
+// wantlist for titles/art. Shared by watcher.js (server mode) and watch-once.js (committed gems.json).
+function zeroWatch(store, wantlist) {
+  const zero = new Set(store.listZeroStock());
+  return (wantlist || [])
+    .filter((r) => zero.has(String(r.releaseId)))
+    .map((r) => ({ releaseId: r.releaseId, title: r.title, artist: r.artist, year: r.year, thumb: r.thumb }));
+}
+
+// Process ONE release: fetch stats, update history, refresh suggestion if stale, evaluate, and
+// record what fired. Pure of the loop, so testable. Returns { deal, gem } (both nullable):
+//   deal — a new-low price deal (the classic alert, price-gated)
+//   gem  — a 💎 rare appearance: the release had ZERO copies for sale and just got its first,
+//          fired REGARDLESS of price (dedupe via a per-release cooldown only)
 async function processRelease(rel, deps) {
   const { client, store, engine, config } = deps;
   const stats = await client.getMarketplaceStats(rel.releaseId, config.currency);
@@ -89,6 +106,7 @@ async function processRelease(rel, deps) {
   const curObs = { ts: Date.now(), lowest: stats.lowestPrice, numForSale: stats.numForSale };
   store.pushObservation(rel.releaseId, curObs);
   const freshListing = engine.isFreshListing(prevObs, curObs);
+  const rareAppearance = config.rareGems !== false && engine.isRareAppearance(prevObs, curObs);
 
   // Cached, weekly-refreshed price suggestions (token required; ignore failures).
   // We keep the FULL per-condition ladder now (for impliedGrade), not just VG+/VG.
@@ -111,6 +129,40 @@ async function processRelease(rel, deps) {
   // local dashboard scan), so the cloud reads it from the committed soldmedians.json seeded at startup;
   // absent (a release never scanned) it falls back to the suggestion exactly as before.
   const sold = store.getSoldMedian(rel.releaseId);
+
+  // 💎 Rare gem: the release had ZERO copies for sale and just got its first. Fired regardless of
+  // price or warm-up (the previous observation existing IS the warm-up — we knew it was at zero).
+  // The only gate is a per-release cooldown so a num_for_sale count flapping 0<->1 on Discogs' side
+  // can't re-fire the same copy every sweep; a copy that appears, sells, and is re-listed after the
+  // cooldown alerts again — that's a genuinely new chance at a rare record, exactly what we want.
+  let gem = null;
+  if (rareAppearance) {
+    const ra = store.getRareAlerted(rel.releaseId);
+    const cooldown = config.rareCooldownMs ?? DEFAULTS.rareCooldownMs;
+    if (!ra || Date.now() - ra.ts > cooldown) {
+      const refSource = sold && sold.median != null ? 'sold-median' : (sug && sug.vgplus != null ? 'suggestion' : null);
+      gem = {
+        id: `${rel.releaseId}-gem-${Date.now()}`,
+        type: 'gem',
+        releaseId: rel.releaseId,
+        title: rel.title,
+        artist: rel.artist,
+        year: rel.year,
+        thumb: rel.thumb,
+        lowest: stats.lowestPrice,
+        currency: stats.currency || config.currency,
+        numForSale: stats.numForSale,
+        reference: refSource === 'sold-median' ? sold.median : (refSource === 'suggestion' ? sug.vgplus : null),
+        referenceSource: refSource,
+        url: `${engine.releaseMarketUrl(rel.releaseId)}?sort=price%2Casc&limit=25&currency=${config.currency}`,
+        releaseUrl: engine.releaseUrl(rel.releaseId),
+        ts: Date.now(),
+      };
+      store.addGem(gem);
+      store.setRareAlerted(rel.releaseId, { ts: Date.now(), numForSale: stats.numForSale });
+    }
+  }
+
   const sig = engine.evaluateMarketSignal({
     lowest: stats.lowestPrice,
     soldMedian: sold ? sold.median : null,
@@ -126,7 +178,7 @@ async function processRelease(rel, deps) {
   const fire = engine.shouldFire(sig, store.historyCount(rel.releaseId), {
     mode: config.mode, ownDropFactor: config.ownDropFactor, warmupMin: config.warmupMin, freshListing,
   });
-  if (!fire) return null;
+  if (!fire) return { deal: null, gem };
 
   const deal = {
     id: `${rel.releaseId}-${Date.now()}`,
@@ -163,7 +215,7 @@ async function processRelease(rel, deps) {
   };
   store.addDeal(deal);
   store.setAlerted(rel.releaseId, { lowest: stats.lowestPrice, ts: Date.now() });
-  return deal;
+  return { deal, gem };
 }
 
 async function run() {
@@ -184,7 +236,12 @@ async function run() {
   if (mailer.enabled) mailer.verify().then((ok) => log(`Mailer (${mailer.provider}) ${ok ? 'verified' : 'ready'}.`)).catch((e) => log('Mailer verify FAILED:', e.message));
 
   const state = { wantlistSize: 0, lastSweepAt: null, sweepCount: 0, lastReleaseAt: null, lastError: null, mailer: mailer.enabled };
-  const server = makeServer({ store, token: config.dashboardToken, getStatus: () => ({ ...state, dealsStored: store.countDeals(), rateRemaining: client.rateRemaining }) });
+  const server = makeServer({
+    store,
+    token: config.dashboardToken,
+    getStatus: () => ({ ...state, dealsStored: store.countDeals(), rateRemaining: client.rateRemaining }),
+    getZeroWatch: () => zeroWatch(store, wantlist),
+  });
   server.listen(config.dashboardPort, () => log(`Dashboard API on :${config.dashboardPort}${config.dashboardToken ? ' (token-protected)' : ' (OPEN — set DASHBOARD_TOKEN!)'}`));
 
   let wantlist = [];
@@ -207,10 +264,17 @@ async function run() {
       idx++;
       if (idx % wantlist.length === 0) { state.sweepCount++; state.lastSweepAt = Date.now(); }
 
-      const deal = await processRelease(rel, { client, store, engine, config });
+      const { deal, gem } = await processRelease(rel, { client, store, engine, config });
       state.lastReleaseAt = Date.now();
       state.lastError = null;
 
+      if (gem) {
+        log(`GEM 💎 ${gem.artist} – ${gem.title}  first copy for sale at ${gem.currency} ${gem.lowest}  (was 0 for sale)`);
+        if (mailer.enabled) {
+          try { await mailer.sendGems([gem]); log('  gem emailed.'); }
+          catch (e) { log('  gem email FAILED:', e.message); }
+        }
+      }
       if (deal) {
         log(`DEAL${deal.freshListing ? ' 🆕' : '  '} ${deal.artist} – ${deal.title}  ${deal.currency} ${deal.lowest}  (${Math.round(deal.discount * 100)}% off ${deal.referenceSource}${deal.suspicious ? ', suspicious' : ''})`);
         if (mailer.enabled) {
@@ -228,7 +292,7 @@ async function run() {
   }
 }
 
-module.exports = { processRelease, loadConfig, DEFAULTS };
+module.exports = { processRelease, loadConfig, zeroWatch, DEFAULTS };
 
 if (require.main === module && !process.argv.includes('--itest')) run();
 
@@ -259,19 +323,19 @@ if (require.main === module && process.argv.includes('--itest')) {
     const deps = { client, store, engine, config };
 
     // Obs 1-3 (25, 24, 26): under warmupMin=4 -> no alerts even though 25 vs 40 is "cheap".
-    for (let i = 0; i < 3; i++) assert.strictEqual(await processRelease(rel, deps), null, 'warm-up suppresses early observations');
+    for (let i = 0; i < 3; i++) assert.strictEqual((await processRelease(rel, deps)).deal, null, 'warm-up suppresses early observations');
 
     // Obs 4 (25): warmed up now, but 25 == its own usual lowest -> no own-dip -> NO fire (flood killer).
-    assert.strictEqual(await processRelease(rel, deps), null, 'standing cheap copy does not fire in balanced mode');
+    assert.strictEqual((await processRelease(rel, deps)).deal, null, 'standing cheap copy does not fire in balanced mode');
 
     // Obs 5 (12): a genuine dip ~52% under its own median, >50% under VG+ suggestion, priced like VG -> FIRE.
-    const dip = await processRelease(rel, deps);
+    const dip = (await processRelease(rel, deps)).deal;
     assert.ok(dip, 'genuine new-low trustworthy dip fires');
     assert.ok(dip.ownDrop > 0.4, 'dip is well under its own usual lowest');
     assert.ok(!dip.suspicious, '12 is above the VG suggestion 10 -> priced like a real copy, not worn/suspicious');
 
     // Obs 6 (12): same price -> not a new low -> no re-alert.
-    assert.strictEqual(await processRelease(rel, deps), null, 'same dip price does not re-alert');
+    assert.strictEqual((await processRelease(rel, deps)).deal, null, 'same dip price does not re-alert');
 
     assert.strictEqual(store.countDeals(), 1, 'exactly one deal recorded in balanced mode');
 
@@ -287,13 +351,54 @@ if (require.main === module && process.argv.includes('--itest')) {
     };
     const rel2 = { releaseId: 777, title: 'Diamond', artist: 'Rare', year: 1983 };
     const deps2 = { client: client2, store, engine, config };
-    assert.strictEqual(await processRelease(rel2, deps2), null, 'obs1: not warmed (no prior obs, not fresh) -> no fire');
-    const gem = await processRelease(rel2, deps2);
-    assert.ok(gem, 'obs2: a just-listed copy fires on the light warm-up');
-    assert.strictEqual(gem.referenceSource, 'sold-median', 'the primed REAL median is the reference, not the VG+ suggestion');
-    assert.strictEqual(gem.reference, 50, 'reference is the committed sold-median (50), not the suggestion (30)');
-    assert.strictEqual(gem.soldMedian, 50, 'deal carries the sold-median for the email/dashboard');
-    assert.ok(gem.freshListing, 'tagged as just-listed');
+    assert.strictEqual((await processRelease(rel2, deps2)).deal, null, 'obs1: not warmed (no prior obs, not fresh) -> no fire');
+    const freshDeal = (await processRelease(rel2, deps2)).deal;
+    assert.ok(freshDeal, 'obs2: a just-listed copy fires on the light warm-up');
+    assert.strictEqual(freshDeal.referenceSource, 'sold-median', 'the primed REAL median is the reference, not the VG+ suggestion');
+    assert.strictEqual(freshDeal.reference, 50, 'reference is the committed sold-median (50), not the suggestion (30)');
+    assert.strictEqual(freshDeal.soldMedian, 50, 'deal carries the sold-median for the email/dashboard');
+    assert.ok(freshDeal.freshListing, 'tagged as just-listed');
+
+    // --- 💎 rare gem: a release at ZERO for sale gets its first copy — alert regardless of price.
+    // The €60 asking price is DOUBLE the €30 VG+ suggestion (never a "deal"), yet the gem fires:
+    // availability is the signal here, not price.
+    const gq = [
+      { lowest: null, numForSale: 0 }, // obs1: nothing for sale (baseline)
+      { lowest: 60, numForSale: 1 },   // obs2: first copy appears -> GEM
+      { lowest: 60, numForSale: 2 },   // obs3: another copy (1->2): fresh, but NOT rare
+      { lowest: null, numForSale: 0 }, // obs4: sold out again
+      { lowest: 55, numForSale: 1 },   // obs5: re-appears within the cooldown -> suppressed
+      { lowest: null, numForSale: 0 }, // obs6: sold out again
+      { lowest: 55, numForSale: 1 },   // obs7: re-appears after the cooldown -> fires again
+    ];
+    let gk = 0;
+    const client3 = {
+      async getMarketplaceStats() { const v = gq[Math.min(gk++, gq.length - 1)]; return { lowestPrice: v.lowest, numForSale: v.numForSale, currency: 'EUR' }; },
+      async getPriceSuggestions() { return { 'Very Good Plus (VG+)': { value: 30, currency: 'EUR' }, 'Very Good (VG)': { value: 18, currency: 'EUR' } }; },
+    };
+    const rel3 = { releaseId: 888, title: 'Holy Grail', artist: 'Obscure', year: 1985 };
+    const deps3 = { client: client3, store, engine, config };
+    let r3 = await processRelease(rel3, deps3);
+    assert.strictEqual(r3.gem, null, 'obs1: first-ever observation cannot be a rare appearance');
+    r3 = await processRelease(rel3, deps3);
+    assert.ok(r3.gem, 'obs2: 0 -> 1 fires the rare-gem alert');
+    assert.strictEqual(r3.deal, null, 'the €60 copy is NOT a deal (price-blind gem, price-gated deal)');
+    assert.strictEqual(r3.gem.lowest, 60, 'gem carries the asking price');
+    assert.strictEqual(r3.gem.numForSale, 1, 'gem carries the for-sale count');
+    assert.strictEqual(r3.gem.reference, 30, 'gem carries the VG+ suggestion as context');
+    assert.strictEqual(r3.gem.referenceSource, 'suggestion');
+    r3 = await processRelease(rel3, deps3);
+    assert.strictEqual(r3.gem, null, 'obs3: 1 -> 2 is fresh but not rare (a copy was already for sale)');
+    r3 = await processRelease(rel3, deps3);
+    assert.strictEqual(r3.gem, null, 'obs4: back to zero -> nothing appeared');
+    r3 = await processRelease(rel3, deps3);
+    assert.strictEqual(r3.gem, null, 'obs5: re-appearance within the cooldown is suppressed (anti-flap)');
+    store.setRareAlerted(888, { ts: Date.now() - 13 * 60 * 60 * 1000, numForSale: 1 }); // age the memory past the 12h cooldown
+    r3 = await processRelease(rel3, deps3); // obs6: back to zero
+    assert.strictEqual(r3.gem, null, 'obs6: sold out again');
+    r3 = await processRelease(rel3, deps3);
+    assert.ok(r3.gem, 'obs7: a NEW appearance after the cooldown fires again');
+    assert.strictEqual(store.countGems(), 2, 'two gems recorded for the dashboard feed');
 
     fs.rmSync(tmp, { recursive: true, force: true });
     console.log('watcher itest: all assertions passed');

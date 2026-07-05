@@ -58,11 +58,11 @@ jobs:
           SHIPPING_ESTIMATE: '5'   # add EUR5 to the item price; the alert threshold uses the total
         run: node watch-once.js
 
-      - name: Publish deals.json + state-seed.json for the dashboard / cache recovery
+      - name: Publish deals.json + gems.json + state-seed.json for the dashboard / cache recovery
         run: |
           git config user.name "deal-watcher"
           git config user.email "deal-watcher@users.noreply.github.com"
-          git add deals.json state-seed.json
+          git add deals.json gems.json state-seed.json
           git commit -m "deals update [skip ci]" || echo "no changes"
           git push || echo "nothing to push"
 

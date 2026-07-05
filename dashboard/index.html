@@ -37,6 +37,12 @@
     <button id="btn-scan-cancel" class="ghost small">Stop</button>
   </div>
 
+  <!-- View tabs: price deals vs rare gems (0-for-sale releases getting their first copy) -->
+  <nav class="tabs">
+    <button id="tab-deals" class="tab active" type="button">💸 Deals</button>
+    <button id="tab-gems" class="tab" type="button" title="Wantlist releases that had ZERO copies for sale — alerts the moment the first copy appears, at any price">💎 Rare gems<span id="gems-count" class="tab-badge hidden"></span></button>
+  </nav>
+
   <section class="filters">
     <input type="search" id="search" placeholder="Search artist or title…" />
     <label class="f">Min value (VG+)

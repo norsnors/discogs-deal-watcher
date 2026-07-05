@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('api', {
   saveConfig: (c) => ipcRenderer.invoke('config:set', c),
   testConfig: (c) => ipcRenderer.invoke('config:test', c),
   getDeals: (limit) => ipcRenderer.invoke('deals:get', limit),
+  // 💎 rare gems + zero-stock watch list -> { ts, gems: [...], zeroWatch: [...] }
+  getGems: () => ipcRenderer.invoke('gems:get'),
   getStatus: () => ipcRenderer.invoke('status:get'),
   getHealth: () => ipcRenderer.invoke('health:get'),
   openExternal: (url) => ipcRenderer.invoke('open:external', url),

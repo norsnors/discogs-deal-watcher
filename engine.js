@@ -409,16 +409,32 @@ function isFreshListing(prevObs, curObs) {
 }
 
 /*
+ * isRareAppearance(prevObs, curObs) — the RARE-GEM event: a release that had ZERO copies for
+ * sale just got its first one. For a hard-to-find record this is the highest-value signal there
+ * is — price is irrelevant (the alert fires regardless; the user judges value themselves).
+ * Stricter than isFreshListing: the previous observation must be exactly 0 (known, not null —
+ * a release we've never counted can't claim the "was unavailable" story).
+ */
+function isRareAppearance(prevObs, curObs) {
+  if (!prevObs || !curObs) return false;
+  const pn = num(prevObs.numForSale);
+  const cn = num(curObs.numForSale);
+  return pn === 0 && cn != null && cn > 0;
+}
+
+/*
  * releaseWatchScore(history, now, opts) — how urgently a release deserves re-checking.
  * Higher = check sooner. Lets the rotating sweep spend its limited per-run API budget on
  * the releases most likely to surface a just-listed bargain, instead of pure round-robin.
  *
  *   staleness  — minutes since last checked (never-checked sorts first); the coverage term
  *   activity   — the last check showed a new listing or a price drop (it's "hot")
- *   rarity     — few copies for sale: a cheap copy is rarer and more urgent to grab
+ *   rarity     — few copies for sale: a cheap copy is rarer and more urgent to grab.
+ *                ZERO for sale is the rarest of all: the next check might catch the first copy
+ *                appearing (the rare-gem event), so it outranks every non-zero count.
  */
 function releaseWatchScore(history, now, opts = {}) {
-  const { activityBoost = 30, dropBoost = 40, rarityCap = 12, rarityWeight = 1.5, recentMs = 0 } = opts;
+  const { activityBoost = 30, dropBoost = 40, rarityCap = 12, rarityWeight = 1.5, zeroExtra = 6, recentMs = 0 } = opts;
   const hist = history || [];
   const last = hist[hist.length - 1];
   const lastTs = last ? last.ts : 0;
@@ -434,7 +450,10 @@ function releaseWatchScore(history, now, opts = {}) {
   }
 
   const n = last ? num(last.numForSale) : null;
-  const rarity = n != null && n > 0 && n <= rarityCap ? (rarityCap - n) * rarityWeight : 0;
+  const rarity = n == null ? 0
+    : n === 0 ? (rarityCap + zeroExtra) * rarityWeight // zero-stock: watch hardest for the first copy
+    : n <= rarityCap ? (rarityCap - n) * rarityWeight
+    : 0;
 
   return stalenessMin + activity + rarity;
 }
@@ -462,6 +481,7 @@ module.exports = {
   dealValueScore,
   shouldFire,
   isFreshListing,
+  isRareAppearance,
   releaseWatchScore,
   extractLadder,
   impliedGrade,
@@ -734,6 +754,14 @@ if (require.main === module && process.argv.includes('--selftest')) {
   assert.ok(!isFreshListing({ numForSale: 5 }, { numForSale: 2 }), 'count fell (a copy sold) -> not fresh');
   assert.ok(!isFreshListing(null, { numForSale: 2 }), 'no previous observation -> not fresh');
 
+  // --- isRareAppearance (the rare-gem event: 0 for sale -> first copy appears) ---
+  assert.ok(isRareAppearance({ numForSale: 0 }, { numForSale: 1 }), '0 -> 1: the first copy appeared (the gem event)');
+  assert.ok(isRareAppearance({ numForSale: 0 }, { numForSale: 3 }), '0 -> 3: still a rare appearance');
+  assert.ok(!isRareAppearance({ numForSale: 1 }, { numForSale: 2 }), '1 -> 2 is fresh but NOT rare (a copy was already for sale)');
+  assert.ok(!isRareAppearance({ numForSale: 0 }, { numForSale: 0 }), 'still zero -> nothing appeared');
+  assert.ok(!isRareAppearance({ numForSale: null }, { numForSale: 2 }), 'unknown previous count can\'t claim "was unavailable"');
+  assert.ok(!isRareAppearance(null, { numForSale: 2 }), 'no previous observation -> not a rare appearance');
+
   // --- releaseWatchScore ---
   const t = 10_000_000;
   const never = releaseWatchScore([], t);
@@ -743,6 +771,10 @@ if (require.main === module && process.argv.includes('--selftest')) {
   const cold = releaseWatchScore([{ ts: t - 70 * 60000, lowest: 20, numForSale: 8 }, { ts: t - 10 * 60000, lowest: 20, numForSale: 8 }], t);
   assert.ok(hot > cold, 'a release that just dropped + got a new listing outranks a quiet one checked at the same time');
   assert.strictEqual(releaseWatchScore([{ ts: t - 60_000, lowest: 20, numForSale: 5 }], t, { recentMs: 5 * 60000 }), -1, 'checked < recentMs ago -> skipped this round');
+  // Zero-stock releases are the rarest of all: the next check might catch the first copy appearing.
+  const zeroStock = releaseWatchScore([{ ts: t - 10 * 60000, lowest: null, numForSale: 0 }], t);
+  const oneStock = releaseWatchScore([{ ts: t - 10 * 60000, lowest: 50, numForSale: 1 }], t);
+  assert.ok(zeroStock > oneStock, 'a zero-for-sale release outranks even a 1-copy release at equal staleness');
 
   console.log('engine selftest: all assertions passed');
 }

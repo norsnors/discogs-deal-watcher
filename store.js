@@ -7,6 +7,8 @@
  *   alerted.json      { [releaseId]: { lowest, ts } }   last price we emailed an alert for
  *   suggestions.json  { [releaseId]: { ts, vgplus, vg } }   cached price suggestions
  *   deals.json        [ deal, ... ]  newest-first, capped (what the dashboard reads)
+ *   gems.json         [ gem, ... ]   rare-appearance alerts (0 for sale -> first copy), newest-first
+ *   rare-alerted.json { [releaseId]: { ts, numForSale } }  rare-gem dedupe/cooldown memory
  *
  * Writes are atomic (write tmp + rename). Safe to delete the whole dir; it rebuilds.
  */
@@ -16,6 +18,7 @@ const path = require('path');
 
 const HISTORY_CAP = 60;
 const DEALS_CAP = 1000;
+const GEMS_CAP = 500;
 // How many synthetic observations a re-seeded release gets. Must exceed the warm-up threshold
 // (warmupMin=4) so a release recovered from the committed seed counts as already warmed; capped so
 // the exported digest is stable run-to-run (it stops changing once a release passes this) -> tiny git churn.
@@ -37,9 +40,11 @@ function makeStore(dir) {
 
   const history = read('history.json', {});
   const alerted = read('alerted.json', {});
+  const rareAlerted = read('rare-alerted.json', {}); // rare-gem (0 -> first copy) dedupe memory
   const suggestions = read('suggestions.json', {});
   const soldMedians = read('soldmedians.json', {}); // real sales-history medians (scraped locally)
   let deals = read('deals.json', []);
+  let gems = read('gems.json', []);
 
   return {
     // --- price history ---
@@ -63,6 +68,21 @@ function makeStore(dir) {
     // --- alert dedupe memory ---
     getAlerted(releaseId) { return alerted[releaseId] || null; },
     setAlerted(releaseId, v) { alerted[releaseId] = v; write('alerted.json', alerted); },
+
+    // --- rare-gem alert memory (dedupe/cooldown for the 0 -> first-copy event) ---
+    getRareAlerted(releaseId) { return rareAlerted[releaseId] || null; },
+    setRareAlerted(releaseId, v) { rareAlerted[releaseId] = v; write('rare-alerted.json', rareAlerted); },
+
+    // --- zero-stock watch: releases whose LAST observation counted 0 copies for sale ---
+    // (the rarities we're waiting on — the dashboard's "watched" list). Returns release ids as strings.
+    listZeroStock() {
+      const out = [];
+      for (const [id, arr] of Object.entries(history)) {
+        const last = arr && arr.length ? arr[arr.length - 1] : null;
+        if (last && last.numForSale === 0) out.push(id);
+      }
+      return out;
+    },
 
     // --- cached price suggestions ---
     getSuggestion(releaseId) { return suggestions[releaseId] || null; },
@@ -91,11 +111,16 @@ function makeStore(dir) {
         const tmArr = arr.slice(-30).map((o) => o.lowest).filter((x) => typeof x === 'number' && x > 0).sort((a, b) => a - b);
         const tm = tmArr.length ? round2(tmArr.length % 2 ? tmArr[(tmArr.length - 1) / 2] : (tmArr[tmArr.length / 2 - 1] + tmArr[tmArr.length / 2]) / 2) : null;
         const al = alerted[id] ? round2(alerted[id].lowest) : null;
+        // Last known for-sale count (0 included!) — preserves the "was at zero" knowledge across a
+        // cache wipe so the rare-gem (0 -> first copy) detector doesn't go blind after eviction.
+        const lastObs = arr.length ? arr[arr.length - 1] : null;
+        const nf = lastObs && typeof lastObs.numForSale === 'number' ? lastObs.numForSale : null;
         if (!n && al == null) continue;
         const e = {};
         if (n) e.n = n;
         if (tm != null) e.tm = tm;
         if (al != null) e.al = al;
+        if (nf != null) e.nf = nf;
         seed[id] = e;
       }
       return seed;
@@ -103,6 +128,9 @@ function makeStore(dir) {
     // Restore warm-up + dedupe for releases the (possibly empty) cache doesn't already know. Fills
     // `n` synthetic observations at the trailing median so historyCount + trailingMedianLowest both
     // recover; never overwrites a release the cache already has (the cache is always the fresher copy).
+    // The synthetic obs carry the seeded numForSale (`nf`, 0 included) so the rare-gem detector keeps
+    // its "this release was at zero" knowledge — a zero-stock release has NO lowest price, so it's
+    // restorable on nf alone.
     primeSeed(map) {
       if (!map || typeof map !== 'object') return 0;
       let restored = 0;
@@ -111,7 +139,8 @@ function makeStore(dir) {
         if (!history[id] || !history[id].length) {
           const n = Math.max(0, Math.min(SEED_WARM, e.n || 0));
           const v = typeof e.tm === 'number' ? e.tm : null;
-          if (n && v != null) { history[id] = Array.from({ length: n }, () => ({ ts: 0, lowest: v, numForSale: null })); restored++; }
+          const nf = typeof e.nf === 'number' ? e.nf : null;
+          if (n && (v != null || nf != null)) { history[id] = Array.from({ length: n }, () => ({ ts: 0, lowest: v, numForSale: nf })); restored++; }
         }
         if (e.al != null && !alerted[id]) alerted[id] = { lowest: e.al, ts: 0 };
       }
@@ -126,10 +155,19 @@ function makeStore(dir) {
     },
     getDeals(limit = 200) { return deals.slice(0, limit); },
     countDeals() { return deals.length; },
+
+    // --- rare gems (dashboard feed for the 💎 tab) ---
+    addGem(gem) {
+      gems.unshift(gem);
+      if (gems.length > GEMS_CAP) gems = gems.slice(0, GEMS_CAP);
+      write('gems.json', gems);
+    },
+    getGems(limit = 100) { return gems.slice(0, limit); },
+    countGems() { return gems.length; },
   };
 }
 
-module.exports = { makeStore, HISTORY_CAP, DEALS_CAP, SEED_WARM };
+module.exports = { makeStore, HISTORY_CAP, DEALS_CAP, GEMS_CAP, SEED_WARM };
 
 // --- tiny self-test (node store.js --selftest) -----------------------------
 if (require.main === module && process.argv.includes('--selftest')) {
@@ -150,6 +188,8 @@ if (require.main === module && process.argv.includes('--selftest')) {
   s.setAlerted(100, { lowest: 12, ts: 99 });
   s.setSuggestion(100, { ts: 5, vgplus: 30, vg: 18 });
   s.addDeal({ id: 'd1', releaseId: 100, lowest: 12 });
+  s.setRareAlerted(100, { ts: 77, numForSale: 1 });
+  s.addGem({ id: 'g1', releaseId: 100, lowest: 40 });
 
   // Reopen from disk -> state persisted.
   s = makeStore(tmp);
@@ -157,6 +197,16 @@ if (require.main === module && process.argv.includes('--selftest')) {
   assert.strictEqual(s.getSuggestion(100).vgplus, 30, 'suggestion persisted');
   assert.strictEqual(s.getDeals()[0].id, 'd1', 'deal persisted');
   assert.strictEqual(s.trailingMedianLowest(100), 30, 'history persisted');
+  assert.strictEqual(s.getRareAlerted(100).ts, 77, 'rare-gem alert memory persisted');
+  assert.strictEqual(s.getGems()[0].id, 'g1', 'gem persisted');
+  assert.strictEqual(s.countGems(), 1, 'gem count');
+
+  // Zero-stock watch: only releases whose LAST obs counted 0 for sale.
+  s.pushObservation(500, { ts: 1, lowest: null, numForSale: 0 });
+  s.pushObservation(600, { ts: 1, lowest: 10, numForSale: 0 });
+  s.pushObservation(600, { ts: 2, lowest: 10, numForSale: 2 }); // came back in stock -> not zero-watched
+  const zero = s.listZeroStock();
+  assert.ok(zero.includes('500') && !zero.includes('600') && !zero.includes('100'), 'listZeroStock returns only releases currently at 0');
 
   // primeSoldMedians seeds in-memory medians without writing to disk (cloud reads committed medians).
   s.primeSoldMedians({ 200: { median: 42, low: 30, high: 60 } });
@@ -171,6 +221,8 @@ if (require.main === module && process.argv.includes('--selftest')) {
   assert.strictEqual(seed[100].tm, 30, 'exported trailing median');
   assert.strictEqual(seed[100].al, 12, 'exported last-alerted lowest');
   assert.strictEqual(seed[400].n, 6, 'exported warm-up count for the warmed release');
+  assert.strictEqual(seed[100].nf, 6, 'exported last for-sale count');
+  assert.strictEqual(seed[500].nf, 0, 'a zero-stock release exports nf 0 (the rare-gem knowledge)');
 
   // A FRESH store (simulating a wiped Actions cache) recovers warm-up + dedupe from the digest.
   const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), 'ddw-seed-'));
@@ -182,6 +234,9 @@ if (require.main === module && process.argv.includes('--selftest')) {
   assert.strictEqual(s2.trailingMedianLowest(400), 20, 'recovered trailing median matches');
   assert.strictEqual(s2.historyCount(100), 3, 'partial warm-up progress is preserved exactly (3 obs)');
   assert.strictEqual(s2.getAlerted(100).lowest, 12, 'recovered alert-dedupe memory even without full history');
+  assert.strictEqual(s2.lastObservation(100).numForSale, 6, 'recovered obs carry the last for-sale count');
+  assert.strictEqual(s2.lastObservation(500).numForSale, 0, 'a zero-stock release recovers on nf alone (no price needed) — rare-gem watch survives a cache wipe');
+  assert.ok(s2.listZeroStock().includes('500'), 'recovered zero-stock release is back on the watch list');
 
   // primeSeed never clobbers a release the cache already has (cache is the fresher copy).
   s2.pushObservation(400, { ts: 9, lowest: 99, numForSale: 1 });

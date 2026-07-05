@@ -4,6 +4,8 @@
  *
  * Runs in the same process as the watcher loop (one container). Endpoints:
  *   GET /api/deals?limit=N   -> [deal, ...] newest-first
+ *   GET /api/gems?limit=N    -> { ts, gems: [...], zeroWatch: [...] }  rare-gem alerts + the
+ *                               zero-stock watch list (releases with 0 copies for sale)
  *   GET /api/status          -> { wantlistSize, lastSweepAt, sweepCount, rateRemaining, ... }
  *   GET /healthz             -> "ok"  (no auth; for host health checks)
  *
@@ -13,7 +15,7 @@
 
 const http = require('http');
 
-function makeServer({ store, getStatus, token }) {
+function makeServer({ store, getStatus, token, getZeroWatch }) {
   const server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'authorization, content-type');
@@ -35,6 +37,10 @@ function makeServer({ store, getStatus, token }) {
     if (url.pathname === '/api/deals') {
       const limit = Math.min(parseInt(url.searchParams.get('limit') || '200', 10) || 200, 1000);
       return json(store.getDeals(limit));
+    }
+    if (url.pathname === '/api/gems') {
+      const limit = Math.min(parseInt(url.searchParams.get('limit') || '100', 10) || 100, 500);
+      return json({ ts: Date.now(), gems: store.getGems(limit), zeroWatch: getZeroWatch ? getZeroWatch() : [] });
     }
     if (url.pathname === '/api/status') return json(getStatus());
 

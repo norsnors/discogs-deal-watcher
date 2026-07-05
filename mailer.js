@@ -90,6 +90,62 @@ function renderDealsEmail(deals) {
   return { subject, text, html };
 }
 
+/*
+ * renderGemsEmail(gems) — the RARE-GEM alert: a wantlist release that had ZERO copies for sale just
+ * got its first one. Price is deliberately NOT a gate here (the whole point: for a truly rare record
+ * you want to know the moment ANY copy surfaces, at any price) — so the email leads with the event,
+ * shows the asking price plainly, and adds the reference value only as context.
+ */
+function renderGemsEmail(gems) {
+  const n = gems.length;
+  const first = gems[0];
+  const title = (g) => `${g.artist ? g.artist + ' – ' : ''}${g.title || 'release ' + g.releaseId}`;
+  const subject = n === 1
+    ? `💎 Rare find: ${title(first)} — first copy for sale (${fmtPrice(first.lowest, first.currency)})`
+    : `💎 ${n} rare wantlist records just became available`;
+
+  const refLine = (g) => (g.reference != null
+    ? `worth ~${fmtPrice(g.reference, g.currency)} (${REF_LABEL[g.referenceSource] || 'reference'})`
+    : null);
+
+  const textRows = gems.map((g) => [
+    `• ${title(g)}`,
+    `  Had NO copies for sale — ${g.numForSale === 1 ? 'one just appeared' : g.numForSale + ' just appeared'} at ${fmtPrice(g.lowest, g.currency)}${refLine(g) ? `  ·  ${refLine(g)}` : ''}`,
+    `  Buy: ${g.url}`,
+  ].join('\n'));
+  const text = `${n} rare record${n > 1 ? 's' : ''} from your wantlist just became available (previously ZERO for sale):\n\n${textRows.join('\n\n')}\n\nRare copies sell fast — check them now. Condition/price are unfiltered by design.\n`;
+
+  const cards = gems.map((g) => {
+    const thumb = g.thumb
+      ? `<img src="${esc(g.thumb)}" alt="" width="64" height="64" style="border-radius:6px;object-fit:cover;margin-right:12px">` : '';
+    const ref = refLine(g) ? `<div style="font-size:12px;color:#666">${esc(refLine(g))}</div>` : '';
+    return `
+      <tr><td style="padding:14px 0;border-bottom:1px solid #eee">
+        <table role="presentation" width="100%"><tr>
+          <td width="64" valign="top">${thumb}</td>
+          <td valign="top">
+            <div style="font-size:16px;font-weight:600;color:#111">${esc(title(g))}</div>
+            <div style="font-size:13px;color:#7c3aed;font-weight:600;margin:4px 0">💎 Had 0 copies for sale — ${g.numForSale === 1 ? 'the first one' : esc(String(g.numForSale)) + ' copies'} just appeared</div>
+            <div style="margin:6px 0">
+              <span style="font-size:20px;font-weight:700;color:#111">${esc(fmtPrice(g.lowest, g.currency))}</span>
+              <span style="font-size:12px;color:#888;margin-left:8px">asking price — unfiltered</span>
+            </div>
+            ${ref}
+            <a href="${esc(g.url)}" style="display:inline-block;margin-top:10px;background:#7c3aed;color:#fff;text-decoration:none;padding:8px 16px;border-radius:6px;font-size:14px;font-weight:600">View &amp; buy on Discogs →</a>
+          </td>
+        </tr></table>
+      </td></tr>`;
+  }).join('');
+
+  const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:560px;margin:0 auto;color:#111">
+    <h2 style="font-size:18px;margin:0 0 4px">💎 ${n} rare wantlist record${n > 1 ? 's' : ''} now for sale</h2>
+    <p style="font-size:12px;color:#888;margin:0 0 12px">These releases had ZERO copies for sale until now. Price and condition are unfiltered — rare copies sell fast, so judge quickly.</p>
+    <table role="presentation" width="100%">${cards}</table>
+  </div>`;
+
+  return { subject, text, html };
+}
+
 const RESEND_DEFAULT_FROM = 'Discogs Deal Watcher <onboarding@resend.dev>';
 
 // Pure: the JSON body sent to the Resend API. Exported for testing.
@@ -109,7 +165,7 @@ function buildResendPayload(cfg, mail) {
 
 function disabledMailer(provider, why) {
   const off = async () => { throw new Error(`mailer disabled: ${why}`); };
-  return { enabled: false, provider, send: off, sendDeals: off, async verify() { return false; } };
+  return { enabled: false, provider, send: off, sendDeals: off, sendGems: off, async verify() { return false; } };
 }
 
 // Resend (HTTP API) — no SMTP, so it works anywhere (Node host, Cloudflare Workers,
@@ -133,6 +189,7 @@ function resendMailer(cfg) {
     async verify() { return true; }, // no verify endpoint; the key is validated on first send
     async send(mail) { return post(mail); },
     async sendDeals(deals) { return post(renderDealsEmail(deals)); },
+    async sendGems(gems) { return post(renderGemsEmail(gems)); },
   };
 }
 
@@ -158,6 +215,7 @@ function gmailMailer(cfg) {
     async verify() { return transport.verify(); },
     async send({ subject, text, html }) { return transport.sendMail({ from, to, replyTo, subject, text, html }); },
     async sendDeals(deals) { const m = renderDealsEmail(deals); return transport.sendMail({ from, to, replyTo, ...m }); },
+    async sendGems(gems) { const m = renderGemsEmail(gems); return transport.sendMail({ from, to, replyTo, ...m }); },
   };
 }
 
@@ -173,7 +231,7 @@ function makeMailer(cfg = {}) {
   return disabledMailer(null, 'set email.provider + credentials');
 }
 
-module.exports = { makeMailer, renderDealsEmail, buildResendPayload, fmtPrice };
+module.exports = { makeMailer, renderDealsEmail, renderGemsEmail, buildResendPayload, fmtPrice };
 
 // --- tiny self-test (node mailer.js --selftest) ----------------------------
 if (require.main === module && process.argv.includes('--selftest')) {
@@ -190,6 +248,23 @@ if (require.main === module && process.argv.includes('--selftest')) {
   assert.ok(/estimate/.test(m.text), 'a non-sold-median deal warns the value is an estimate');
   assert.ok(/€8\.00/.test(m.html) && /€4\.00/.test(m.html), 'prices formatted');
   assert.ok(m.text.includes('Buy: https://www.discogs.com/sell/release/1'), 'text has buy link');
+
+  // --- rare-gem email ---
+  const gm = renderGemsEmail([
+    { releaseId: 7, artist: 'Mr. Flagio', title: 'Take A Chance', lowest: 85, currency: 'EUR', numForSale: 1, reference: 120, referenceSource: 'sold-median', url: 'https://www.discogs.com/sell/release/7?sort=price%2Casc' },
+  ]);
+  assert.ok(/💎 Rare find: Mr\. Flagio – Take A Chance/.test(gm.subject), 'single-gem subject leads with the record');
+  assert.ok(/first copy for sale/.test(gm.subject), 'subject says the first copy appeared');
+  assert.ok(/€85\.00/.test(gm.html), 'asking price shown');
+  assert.ok(/ZERO copies for sale/.test(gm.html), 'html explains the zero -> first-copy event');
+  assert.ok(/worth ~€120\.00/.test(gm.text), 'reference shown as context, not a gate');
+  assert.ok(gm.text.includes('Buy: https://www.discogs.com/sell/release/7'), 'gem text has buy link');
+  const gm2 = renderGemsEmail([
+    { releaseId: 1, artist: 'A', title: 'X', lowest: 10, currency: 'EUR', numForSale: 2, url: 'https://x' },
+    { releaseId: 2, artist: 'B', title: 'Y', lowest: 20, currency: 'EUR', numForSale: 1, url: 'https://y' },
+  ]);
+  assert.ok(/💎 2 rare wantlist records/.test(gm2.subject), 'multi-gem subject counts');
+  assert.ok(/2 just appeared/.test(gm2.text), 'multi-copy appearance phrased with the count');
 
   // A deal judged against the REAL sold price is high-trust: no "estimate, confirm" caveat.
   const trusted = renderDealsEmail([{ releaseId: 9, artist: 'A', title: 'B', lowest: 10, currency: 'EUR', reference: 40, referenceSource: 'sold-median', discount: 0.75, numForSale: 2, url: 'https://x' }]);

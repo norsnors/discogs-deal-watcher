@@ -25,11 +25,29 @@ const DEMO = [
   { id: 'demo4', releaseId: 1111, artist: 'Mr. Flagio', title: 'Take A Chance', lowest: 2.0, currency: 'EUR', numForSale: 1, reference: 120, referenceSource: 'suggestion', discount: 0.98, conditionConfirmed: false, suspicious: true, pricedAsWorn: true, impliedGrade: null, freshListing: true, ownDrop: 0.9, url: 'https://www.discogs.com/sell/release/1111?sort=price%2Casc', ts: Date.now() - 1 * 60000, thumb: '' },
 ];
 
+// Demo data for the 💎 Rare tab (browser preview only).
+const DEMO_GEMS = {
+  ts: Date.now(),
+  gems: [
+    { id: 'dg1', releaseId: 1111, artist: 'Mr. Flagio', title: 'Take A Chance', lowest: 95, currency: 'EUR', numForSale: 1, reference: 120, referenceSource: 'sold-median', url: 'https://www.discogs.com/sell/release/1111?sort=price%2Casc', ts: Date.now() - 12 * 60000, thumb: '' },
+    { id: 'dg2', releaseId: 2222, artist: 'Squash Gang', title: 'I Want An Illusion', lowest: 40, currency: 'EUR', numForSale: 2, reference: null, referenceSource: null, url: 'https://www.discogs.com/sell/release/2222?sort=price%2Casc', ts: Date.now() - 3 * 3600000, thumb: '' },
+  ],
+  zeroWatch: [
+    { releaseId: 3333, artist: 'Fockewulf 190', title: 'Body Heat', year: 1984 },
+    { releaseId: 4444, artist: 'Ago', title: 'You Make Me Do It', year: 1985 },
+    { releaseId: 5555, artist: 'Cellophane', title: 'Music Colours', year: 1983 },
+  ],
+};
+
 let allDeals = [];
 let allNearMisses = [];   // releases that looked cheap but didn't qualify (scan only) — see "Show near-misses"
 let seenIds = new Set();
 let firstLoad = true;
 let viewMode = 'cloud';   // 'cloud' | 'scan'
+let activeTab = 'deals';  // 'deals' | 'gems' — the 💎 Rare tab shows rare appearances + the zero-stock watch list
+let gemsData = { ts: null, gems: [], zeroWatch: [] };
+let seenGemIds = new Set();
+let firstGemLoad = true;
 let scanning = false;
 let scannedOnce = false;  // has a local scan run (or its results been loaded) this session? Distinguishes
                           // "no scan yet — go scan" from "scanned, nothing matched right now".
@@ -256,6 +274,122 @@ function filterNearMisses(list) {
   return list.filter((d) => `${d.artist || ''} ${d.title || ''}`.toLowerCase().includes(q));
 }
 
+// --- 💎 Rare gems tab ---------------------------------------------------------
+// A gem = a wantlist release that had ZERO copies for sale and just got its first. Price is
+// deliberately not a filter here (availability IS the signal), so the tab bypasses the deal
+// sliders entirely — only the search box applies (to gems AND the watch list).
+function gemCard(g) {
+  const thumb = g.thumb
+    ? `<img class="thumb" src="${esc(g.thumb)}" alt="" referrerpolicy="no-referrer" />`
+    : `<div class="thumb"></div>`;
+  const appeared = g.numForSale === 1 ? 'first copy appeared' : `${esc(String(g.numForSale))} copies appeared`;
+  const ref = g.reference != null
+    ? `<div class="ref">worth ~${money(g.reference, g.currency)} (${REF_LABEL[g.referenceSource] || 'reference'})</div>` : '';
+  return `<article class="card is-gem">
+    <span class="when">${g.ts ? ago(g.ts) : ''}</span>
+    ${thumb}
+    <div class="body">
+      <p class="title">${esc(g.title || 'Release ' + g.releaseId)}</p>
+      <p class="artist">${esc(g.artist || '')}${g.year ? ` · ${esc(String(g.year))}` : ''}</p>
+      <div class="meta"><span class="tag gem">💎 was 0 for sale — ${appeared}</span></div>
+      <div class="price-row"><span class="price gem-price">${money(g.lowest, g.currency)}</span><span class="gem-ask">asking price — unfiltered</span></div>
+      ${ref}
+      <button class="buy gembuy" data-url="${esc(g.url)}">View &amp; buy on Discogs &rarr;</button>
+    </div>
+  </article>`;
+}
+
+function zwRow(r) {
+  const name = `${r.artist ? r.artist + ' – ' : ''}${r.title || 'Release ' + r.releaseId}`;
+  return `<div class="zw-row">
+    <span class="zw-dot"></span>
+    <span class="zw-title" title="${esc(name)}">${esc(name)}</span>
+    ${r.year ? `<span class="zw-year">${esc(String(r.year))}</span>` : ''}
+    <a class="zw-link" data-url="${esc('https://www.discogs.com/release/' + r.releaseId)}" href="#">view</a>
+  </div>`;
+}
+
+function renderGems() {
+  const wrap = $('deals');
+  const empty = $('empty');
+  const q = $('search').value.trim().toLowerCase();
+  const match = (x) => !q || `${x.artist || ''} ${x.title || ''}`.toLowerCase().includes(q);
+  const gems = (gemsData.gems || []).filter(match);
+  const zw = (gemsData.zeroWatch || []).filter(match);
+  $('resultCount').textContent = '';
+  $('pill-deals').textContent = `${(gemsData.gems || []).length} gem${(gemsData.gems || []).length === 1 ? '' : 's'}`;
+
+  if (!gems.length && !zw.length) {
+    wrap.innerHTML = '';
+    empty.classList.remove('hidden');
+    empty.textContent = q
+      ? 'Nothing on the Rare tab matches your search.'
+      : 'No rare gems yet. Once your wantlist has been swept, releases with ZERO copies for sale are watched here — and the moment the first copy appears it shows up (and lands in your inbox), whatever the price.';
+    return;
+  }
+  empty.classList.add('hidden');
+
+  let html = '';
+  if (gems.length) {
+    html += `<div class="gems-head">💎 Rare appearances — the first copy showed up after none at all</div>`;
+    html += gems.map(gemCard).join('');
+  } else if (!q) {
+    html += `<div class="gems-head muted">💎 No rare appearances yet — the list below is being watched. The moment a first copy shows up it lands here and in your inbox, whatever the price.</div>`;
+  }
+  if (zw.length) {
+    html += `<div class="zw-head">👁 Watching ${zw.length} wantlist release${zw.length === 1 ? '' : 's'} with <b>0 copies for sale</b> — the moment one appears it alerts, at any price</div>`;
+    html += `<div class="zw-list">${zw.map(zwRow).join('')}</div>`;
+  }
+  wrap.innerHTML = html;
+  wrap.querySelectorAll('.buy').forEach((b) => b.addEventListener('click', () => openUrl(b.getAttribute('data-url'))));
+  wrap.querySelectorAll('.zw-link').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); openUrl(a.getAttribute('data-url')); }));
+}
+
+function updateGemsBadge() {
+  const n = (gemsData.gems || []).length;
+  const el = $('gems-count');
+  el.textContent = n ? String(n) : '';
+  el.classList.toggle('hidden', !n);
+}
+
+function normalizeGems(g) {
+  if (Array.isArray(g)) return { ts: null, gems: g, zeroWatch: [] };
+  if (!g || typeof g !== 'object') return { ts: null, gems: [], zeroWatch: [] };
+  return { ts: g.ts || null, gems: Array.isArray(g.gems) ? g.gems : [], zeroWatch: Array.isArray(g.zeroWatch) ? g.zeroWatch : [] };
+}
+
+function notifyNewGems(gems) {
+  if (firstGemLoad) { firstGemLoad = false; gems.forEach((g) => seenGemIds.add(g.id)); return; }
+  const fresh = gems.filter((g) => !seenGemIds.has(g.id));
+  fresh.forEach((g) => seenGemIds.add(g.id));
+  if (fresh.length && 'Notification' in window && Notification.permission === 'granted') {
+    const g = fresh[0];
+    const extra = fresh.length > 1 ? ` (+${fresh.length - 1} more)` : '';
+    const n = new Notification(`💎 Rare find: ${g.artist || ''} – ${g.title || ''}`, {
+      body: `Had 0 copies for sale — first one appeared at ${money(g.lowest, g.currency)}${extra}`,
+    });
+    n.onclick = () => { openUrl(g.url); window.focus(); };
+  }
+}
+
+async function refreshGems() {
+  if (!hasApi) { gemsData = DEMO_GEMS; updateGemsBadge(); if (activeTab === 'gems') render(); return; }
+  try {
+    gemsData = normalizeGems(await window.api.getGems());
+    notifyNewGems(gemsData.gems);
+    updateGemsBadge();
+    if (activeTab === 'gems') render();
+  } catch { /* keep the last known gems — the deals path surfaces connectivity problems */ }
+}
+
+function setTab(tab) {
+  activeTab = tab;
+  document.body.classList.toggle('tab-gems', tab === 'gems');
+  $('tab-deals').classList.toggle('active', tab === 'deals');
+  $('tab-gems').classList.toggle('active', tab === 'gems');
+  render();
+}
+
 function applyFilters(deals, opts = {}) {
   const q = $('search').value.trim().toLowerCase();
   const minV = parseFloat($('minValue').value) || 0;
@@ -291,6 +425,7 @@ function sortDeals(list, mode) {
 }
 
 function render() {
+  if (activeTab === 'gems') return renderGems();
   const enriched = allDeals.map(enrich);
   let deals = applyFilters(enriched);
   // How many deals pass every OTHER filter but are removed SOLELY by "VG+ only"? Cloud/email deals
@@ -503,6 +638,7 @@ async function startScan(opts = {}) {
     allNearMisses = (res && res.nearMisses) || [];
     seenIds = new Set(allDeals.map((d) => d.id));
     setStatus({ wantlistSize: res ? (res.wantlistTotal ?? res.total) : '—' });
+    refreshGems(); // the scan may have found rare gems / refreshed the zero-stock watch list
     render();
   } catch (e) {
     $('empty').classList.remove('hidden');
@@ -559,7 +695,8 @@ function onScanProgress(m) {
     const cov = m.quick ? ` · quick scan (top ${m.total} of ${m.wantlistTotal})` : '';
     const miss = m.nearMisses ? ` · ${m.nearMisses} near-miss${m.nearMisses === 1 ? '' : 'es'} (tick “Show near-misses”)` : '';
     const warm = m.warmedReal ? ` · ${m.warmedReal} sold-median${m.warmedReal === 1 ? '' : 's'} ${m.fullMedians ? 'refreshed' : 'learned'}` : '';
-    $('scan-text').textContent = `Done — ${m.found} VG+ deal${m.found === 1 ? '' : 's'}${ship}${dropped}${cov}${m.aborted ? ' (stopped early)' : ''}.${push}${warm}${miss}`;
+    const gem = m.gems ? ` · 💎 ${m.gems} rare gem${m.gems === 1 ? '' : 's'} (see the Rare tab)` : '';
+    $('scan-text').textContent = `Done — ${m.found} VG+ deal${m.found === 1 ? '' : 's'}${gem}${ship}${dropped}${cov}${m.aborted ? ' (stopped early)' : ''}.${push}${warm}${miss}`;
     return;
   }
   // 'scan' phase: the API sweep and the browser confirmation run concurrently now, so one message
@@ -621,8 +758,10 @@ async function saveSettings() {
   await persistSettings();
   closeSettings();
   firstLoad = true; seenIds = new Set();
+  firstGemLoad = true; seenGemIds = new Set(); // gems come from the (possibly changed) source too
   lastGithubRun = null; // source may have changed (scan <-> github <-> server) — don't carry a stale run
   boot(); // re-evaluate the (possibly changed) source: scan view, cloud poll, or server
+  refreshGems();
 }
 
 async function testConnection() {
@@ -731,6 +870,8 @@ async function boot() {
 
 // --- wire up ---
 window.addEventListener('DOMContentLoaded', () => {
+  $('tab-deals').addEventListener('click', () => setTab('deals'));
+  $('tab-gems').addEventListener('click', () => setTab('gems'));
   $('btn-scan').addEventListener('click', () => startScan());
   $('btn-quickscan').addEventListener('click', () => startScan({ quick: true }));
   $('btn-fullscan').addEventListener('click', () => startScan({ fullMedians: true }));
@@ -765,8 +906,10 @@ window.addEventListener('DOMContentLoaded', () => {
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
 
   boot();                         // first-run wizard, last scan, or cloud poll — and lights up the badge
+  refreshGems();                  // fill the 💎 Rare tab (works in every source mode; demo in preview)
   if (hasApi) {
     setInterval(refresh, 30_000); // poll the cloud every 30s (paused during a local scan)
+    setInterval(refreshGems, 60_000); // 💎 gems change rarely; a slower poll is plenty (raw CDN / local file)
     // Check the real service heartbeat every 2 min. Slow on purpose: the cron only fires every
     // ~15 min, and this is the only api.github.com traffic (deals come from the raw CDN), so 30
     // req/hr stays well under the 60/hr unauthenticated limit.
