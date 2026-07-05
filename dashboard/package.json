@@ -1,7 +1,7 @@
 {
   "name": "discogs-deal-dashboard",
   "productName": "Discogs Deal Watcher",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Discogs Deal Watcher — scans your Discogs wantlist for copies offered far under market value.",
   "author": "Discogs Deal Watcher",
