@@ -301,6 +301,24 @@ Three things can make the watcher stop working without any error you'd notice. A
 A failed deal email now also **exits non-zero**, so GitHub's built-in "workflow failed" notification
 reaches you instead of the error being swallowed in a log nobody reads.
 
+### Telegram push (optional second channel)
+
+Email can land in spam; Telegram can't. With two secrets set, every deal/gem alert is **also** pushed
+to a Telegram chat — instant on your phone, and sent even when the email send fails (that's the point
+of redundancy). Email stays the primary, guarded channel; a Telegram failure only logs a warning.
+
+Setup (~2 minutes, free):
+
+1. In Telegram, message **@BotFather** → `/newbot` → pick a name + username. It replies with a
+   **bot token** (`123456:ABC-...`).
+2. Open a chat with your new bot and send it any message (e.g. `/start`) — a bot can't message you first.
+3. Get your **chat id**: open `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser and read
+   `"chat":{"id":...}` from the JSON.
+4. Set both as GitHub repo secrets `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (cloud), and/or in
+   `config.json` under `telegram: { botToken, chatId }` (local `watcher.js`).
+
+Leave the secrets unset to keep it off (the default).
+
 ### Environment variables
 
 | Var | Meaning |
@@ -312,6 +330,7 @@ reaches you instead of the error being swallowed in a log nobody reads.
 | `MAIL_TO` / `MAIL_FROM` | where alerts go / sender (default `onboarding@resend.dev` — sandbox, verify a domain) |
 | `MAIL_REPLY_TO` | optional reply-to address (small deliverability nudge) |
 | `EMAIL_PROVIDER` | `resend` (default if key present) or `gmail` |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | optional Telegram push next to email (see "Telegram push") |
 | `MODE` | `balanced` (default) / `sensitive` / `strict` |
 | `SLICE_SIZE` | releases checked per `watch-once.js` run, by watch-score priority (GitHub model, default 200) |
 | `DASHBOARD_TOKEN` | bearer token the dashboard must send (live-server model) |

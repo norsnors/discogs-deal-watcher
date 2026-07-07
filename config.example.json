@@ -27,6 +27,12 @@
 
   "_email_deliverability_note": "from=onboarding@resend.dev is Resend's SANDBOX sender: spam-prone and only delivers to your own verified address. For reliable inbox delivery, verify a sending domain in Resend (DKIM/SPF/DMARC) and set `from` to an address on it (env: MAIL_FROM). Until then, add a Gmail filter to never mark these as spam. See README 'Email deliverability'.",
 
+  "telegram": {
+    "botToken": "",
+    "chatId": ""
+  },
+  "_telegram_note": "Optional push channel next to email (no spam folder, instant on your phone). Create a bot via @BotFather, send it /start, read your chat id from getUpdates — see README 'Telegram push'. Leave empty to keep it off. Env: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID.",
+
 
   "_email_gmail_alternative": {
     "provider": "gmail",

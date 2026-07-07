@@ -75,6 +75,15 @@ function loadConfig(configPath) {
         replyTo: env.MAIL_REPLY_TO || fe.replyTo || g.replyTo || '',
       };
     })(),
+    // Telegram push (redundant second alert channel next to email — see telegram.js). Off unless
+    // both are set (secrets TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID, or the config.json telegram block).
+    telegram: (() => {
+      const ft = file.telegram || {};
+      return {
+        botToken: env.TELEGRAM_BOT_TOKEN || ft.botToken || '',
+        chatId: env.TELEGRAM_CHAT_ID || ft.chatId || '',
+      };
+    })(),
   };
   return cfg;
 }
@@ -223,6 +232,7 @@ async function run() {
   const { makeClient } = require('./discogs');
   const { makeStore } = require('./store');
   const { makeMailer } = require('./mailer');
+  const { makeTelegram } = require('./telegram');
   const { makeServer } = require('./server');
 
   const config = loadConfig();
@@ -234,6 +244,8 @@ async function run() {
   const mailer = makeMailer(config.email);
   log(mailer.enabled ? `Email on (${mailer.provider}) -> ${config.email.to || config.email.user}` : 'Email OFF (no email creds) — deals saved to dashboard only.');
   if (mailer.enabled) mailer.verify().then((ok) => log(`Mailer (${mailer.provider}) ${ok ? 'verified' : 'ready'}.`)).catch((e) => log('Mailer verify FAILED:', e.message));
+  const telegram = makeTelegram(config.telegram);
+  log(telegram.enabled ? 'Telegram push on (redundant second channel).' : 'Telegram push off (no telegram.botToken/chatId).');
 
   const state = { wantlistSize: 0, lastSweepAt: null, sweepCount: 0, lastReleaseAt: null, lastError: null, mailer: mailer.enabled };
   const server = makeServer({
@@ -274,12 +286,20 @@ async function run() {
           try { await mailer.sendGems([gem]); log('  gem emailed.'); }
           catch (e) { log('  gem email FAILED:', e.message); }
         }
+        if (telegram.enabled) {
+          try { await telegram.sendGems([gem]); log('  gem pushed to Telegram.'); }
+          catch (e) { log('  gem Telegram push failed (best-effort):', e.message); }
+        }
       }
       if (deal) {
         log(`DEAL${deal.freshListing ? ' 🆕' : '  '} ${deal.artist} – ${deal.title}  ${deal.currency} ${deal.lowest}  (${Math.round(deal.discount * 100)}% off ${deal.referenceSource}${deal.suspicious ? ', suspicious' : ''})`);
         if (mailer.enabled) {
           try { await mailer.sendDeals([deal]); log('  emailed.'); }
           catch (e) { log('  email FAILED:', e.message); }
+        }
+        if (telegram.enabled) {
+          try { await telegram.sendDeals([deal]); log('  pushed to Telegram.'); }
+          catch (e) { log('  Telegram push failed (best-effort):', e.message); }
         }
       }
 

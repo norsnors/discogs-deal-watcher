@@ -24,6 +24,7 @@ const engine = require('./engine');
 const { makeClient } = require('./discogs');
 const { makeStore } = require('./store');
 const { makeMailer } = require('./mailer');
+const { makeTelegram } = require('./telegram');
 const { processRelease, loadConfig, zeroWatch } = require('./watcher');
 
 const STATE_DIR = path.join(__dirname, 'state');
@@ -69,6 +70,10 @@ async function main() {
 
   const client = makeClient({ token: config.token, userAgent: config.userAgent });
   const mailer = makeMailer(config.email);
+  // Telegram = the redundant push channel: best-effort (a failure only logs — email keeps the
+  // loud non-zero-exit guard) and sent INDEPENDENTLY of the email result, so a spam-foldered or
+  // failed mail still buzzes the phone.
+  const telegram = makeTelegram(config.telegram);
   const sliceSize = config.sliceSize || 50;
 
   // Deliverability guard: the Resend SANDBOX sender (onboarding@resend.dev) is testing-only — Resend
@@ -125,7 +130,7 @@ async function main() {
     const slice = (ranked.length ? ranked.map((x) => x.rel) : cur.wantlist).slice(0, take);
     writeCursor(cur); // persist the wantlist cache (selection no longer needs a cursor index)
     const sweepStart = Date.now();
-    console.log(`[sweep ${sweepNo}] Checking the ${slice.length} highest-priority of ${N} (mode=${config.mode}, email=${mailer.enabled ? mailer.provider : 'off'}).`);
+    console.log(`[sweep ${sweepNo}] Checking the ${slice.length} highest-priority of ${N} (mode=${config.mode}, email=${mailer.enabled ? mailer.provider : 'off'}, telegram=${telegram.enabled ? 'on' : 'off'}).`);
 
     const deals = [];
     let gemCount = 0;
@@ -144,6 +149,10 @@ async function main() {
           if (mailer.enabled) {
             try { await mailer.sendGems([gem]); console.log(`  Emailed the rare gem to ${config.email.to}.`); }
             catch (e) { emailError = e; console.log('  Gem email FAILED:', e.message); }
+          }
+          if (telegram.enabled) {
+            try { await telegram.sendGems([gem]); console.log('  Telegram gem push sent.'); }
+            catch (e) { console.log('  Telegram gem push failed (best-effort; email is the guarded channel):', e.message); }
           }
         }
         checked++;
@@ -164,6 +173,10 @@ async function main() {
         catch (e) { emailError = e; console.log('Email FAILED:', e.message); }
       } else {
         console.log('Email disabled — deals saved for the dashboard.');
+      }
+      if (telegram.enabled) {
+        try { await telegram.sendDeals(deals); console.log(`Telegram push sent (${deals.length} deal(s)).`); }
+        catch (e) { console.log('Telegram push failed (best-effort; email is the guarded channel):', e.message); }
       }
     }
 

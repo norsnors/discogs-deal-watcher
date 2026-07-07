@@ -5,7 +5,7 @@
   "description": "Watches your Discogs wantlist and alerts you when a copy is offered far under its median price.",
   "main": "watcher.js",
   "scripts": {
-    "selftest": "node engine.js --selftest && node discogs.js --selftest && node store.js --selftest && node mailer.js --selftest && node watcher.js --itest",
+    "selftest": "node engine.js --selftest && node discogs.js --selftest && node store.js --selftest && node mailer.js --selftest && node telegram.js --selftest && node watcher.js --itest",
     "e2e": "node live-e2e.cjs",
     "once": "node watch-once.js",
     "watch": "node watcher.js",

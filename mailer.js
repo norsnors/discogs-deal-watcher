@@ -231,7 +231,8 @@ function makeMailer(cfg = {}) {
   return disabledMailer(null, 'set email.provider + credentials');
 }
 
-module.exports = { makeMailer, renderDealsEmail, renderGemsEmail, buildResendPayload, fmtPrice };
+// dealLine is shared with telegram.js so both channels render identical flags/labels for a deal.
+module.exports = { makeMailer, renderDealsEmail, renderGemsEmail, buildResendPayload, fmtPrice, dealLine };
 
 // --- tiny self-test (node mailer.js --selftest) ----------------------------
 if (require.main === module && process.argv.includes('--selftest')) {

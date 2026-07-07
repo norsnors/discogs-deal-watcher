@@ -56,6 +56,10 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
           MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          # Optional Telegram push (redundant second channel next to email — no spam folder, instant
+          # on your phone). Leave the secrets unset to keep it off. See README "Telegram push".
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SLICE_SIZE: '750'   # priority sweep: cover the WHOLE wantlist (~715) every sweep. At ~1.1s/call one
                               # sweep is ~13-14 min; if the list grows past ~750 the staleness term rolls the
                               # overflow into the next sweep (no copy is starved).
