@@ -27,6 +27,9 @@
       <button id="btn-scan" class="scan" title="Scan your WHOLE wantlist now for current bargains (~13 min)">⚡ Scan now</button>
       <button id="btn-quickscan" class="scan ghost" title="Quick scan: only the highest-priority releases (~4–5 min). Misses quiet releases this run — they roll into the next scan.">⚡ Quick</button>
       <button id="btn-fullscan" class="scan ghost" title="Deep refresh: full wantlist scan AND re-scrape EVERY sold-median, ignoring the weekly cache (not 50 at a time). Most thorough — guarantees every reference is current — but slow (~30–60 min). Cancellable.">⚡ Full + medians</button>
+      <button id="btn-telegram" class="tg-badge" title="Telegram alerts — get deals instantly on your phone (backup for the email)">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M23.91 3.79 20.3 20.84c-.25 1.21-.98 1.5-1.99.94l-5.5-4.07-2.66 2.57c-.3.3-.55.56-1.1.56l.38-5.56 10.1-9.13c.44-.39-.1-.61-.68-.23L6.3 13.3l-5.45-1.7c-1.18-.36-1.2-1.17.26-1.75l21.26-8.2c.97-.36 1.83.24 1.54 1.73z"/></svg>
+      </button>
       <button id="btn-refresh" title="Refresh">↻</button>
       <button id="btn-settings" title="Settings">⚙</button>
     </div>
@@ -175,6 +178,46 @@
         <span class="spacer"></span>
         <button id="cloud-cancel" class="ghost">Close</button>
         <button id="cloud-run" class="primary">Set it up</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ✈ Telegram push setup: resolve chat id + test, then save the secrets to the user's fork -->
+  <div id="telegram-modal" class="modal hidden">
+    <div class="modal-card">
+      <h2>✈ Telegram alerts</h2>
+      <p class="hint">Get every deal and 💎 rare-gem pushed straight to Telegram — instant on your phone,
+        and it can't land in a spam folder. It runs <b>alongside</b> your email alerts as a backup (and
+        fires even if an email is delayed). Free, ~2 minutes.</p>
+      <ol class="cloud-steps tg-howto">
+        <li data-step="1">In Telegram, open <b>@BotFather</b> → send <b>/newbot</b> → pick a name. It replies with a <b>bot token</b>.</li>
+        <li data-step="2">Open your new bot and tap <b>Start</b> (a bot can't message you until you do).</li>
+        <li data-step="3">Paste the token below and press <b>Test</b> — we find your chat and send a test message.</li>
+      </ol>
+      <p class="hint"><a href="#" id="tg-botfather-help">Open @BotFather in Telegram →</a></p>
+      <label>Bot token
+        <input type="password" id="tg-token" placeholder="123456789:AA…" autocomplete="off" spellcheck="false" />
+      </label>
+      <div id="tg-test-result" class="test-result"></div>
+
+      <div id="tg-connect-wrap" class="hidden">
+        <label>GitHub token <span class="opt">(the same one from the email setup)</span>
+          <input type="password" id="tg-github" placeholder="paste your GitHub token" autocomplete="off" spellcheck="false" />
+        </label>
+        <p class="hint">Saved encrypted to your own cloud watcher so alerts keep coming when this app is closed.</p>
+        <ol id="tg-steps" class="cloud-steps hidden">
+          <li data-step="verify">Check GitHub access</li>
+          <li data-step="secrets">Save your Telegram settings (encrypted)</li>
+          <li data-step="enable">Apply it + start a run</li>
+        </ol>
+      </div>
+
+      <div id="tg-result" class="test-result"></div>
+      <div class="modal-actions">
+        <button id="tg-cancel" class="ghost">Close</button>
+        <span class="spacer"></span>
+        <button id="tg-test-btn" class="ghost">Test</button>
+        <button id="tg-connect" class="primary hidden">Connect</button>
       </div>
     </div>
   </div>

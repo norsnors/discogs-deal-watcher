@@ -29,6 +29,14 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('cloud:progress', h);
     return () => ipcRenderer.removeListener('cloud:progress', h);
   },
+  // ✈ Telegram push: test (resolve chat id + send a test message) then save the secrets to the fork.
+  telegramTest: (opts) => ipcRenderer.invoke('telegram:test', opts),
+  telegramSetup: (opts) => ipcRenderer.invoke('telegram:setup', opts),
+  onTelegramProgress: (cb) => {
+    const h = (_e, m) => cb(m);
+    ipcRenderer.on('telegram:progress', h);
+    return () => ipcRenderer.removeListener('telegram:progress', h);
+  },
   onScrapeProgress: (cb) => {
     const h = (_e, m) => cb(m);
     ipcRenderer.on('scrape:progress', h);

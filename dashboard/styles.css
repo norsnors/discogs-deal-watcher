@@ -92,6 +92,14 @@ body {
   width: 34px; height: 34px; border-radius: 9px; font-size: 16px; cursor: pointer;
 }
 .actions button:hover { background: #1c2531; }
+/* ✈ Telegram badge: entry point to the push-alerts setup. Telegram blue on hover / when connected. */
+.actions button.tg-badge { display: inline-flex; align-items: center; justify-content: center; color: var(--muted); padding: 0; }
+.actions button.tg-badge:hover { color: #29a9eb; background: #12222e; }
+.actions button.tg-badge.ok { color: #29a9eb; border-color: #245a74; }
+/* id-scoped so the numbered markers win over the base .cloud-steps '○' marker regardless of order */
+#telegram-modal .tg-howto { counter-reset: tg; margin-bottom: 14px; }
+#telegram-modal .tg-howto li { counter-increment: tg; padding-left: 24px; }
+#telegram-modal .tg-howto li::before { content: counter(tg); color: var(--accent); font-weight: 700; left: 4px; }
 /* Primary action: Scan now */
 .actions button.scan {
   width: auto; padding: 0 14px; font-size: 13px; font-weight: 700; white-space: nowrap;

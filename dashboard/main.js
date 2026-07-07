@@ -1147,6 +1147,116 @@ ipcMain.handle('cloud:setup', async (e, opts) => {
   catch (err) { return { ok: false, error: err && err.message ? err.message : String(err) }; }
 });
 
+// ── Telegram push setup ────────────────────────────────────────────────────
+// Telegram alerts are sent by the CLOUD watcher (the fork), exactly like the emails — so "connecting
+// Telegram" means storing TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID as secrets on the user's fork. That's
+// why it needs the fork (from the cloud-email setup) + a transient GitHub token. The local scan never
+// pushes, so nothing here runs unless the cloud watcher is set up.
+
+// Resolve the user's chat id from the bot's recent updates and send a test message. Called before
+// connecting so the user sees it work first. botToken-only in; returns the discovered chatId + name.
+async function telegramTest({ botToken, chatId } = {}) {
+  botToken = (botToken || '').trim();
+  chatId = (chatId || '').trim();
+  if (!botToken) throw new Error('Paste your bot token first (from @BotFather).');
+  let chatName = null;
+  if (!chatId) {
+    // getUpdates returns the messages people have sent the bot recently — the user tapping Start on
+    // their new bot puts their own chat there. (No webhook is set on a fresh bot, so this works.)
+    const to = withTimeout(15_000);
+    let data = null;
+    try {
+      const r = await fetch(`https://api.telegram.org/bot${botToken}/getUpdates`, { signal: to.signal });
+      data = await r.json().catch(() => null);
+      if (r.status === 401 || (data && data.error_code === 401)) throw new Error('Telegram rejected the bot token — copy it exactly from @BotFather.');
+    } finally { to.done(); }
+    const chats = [];
+    for (const u of (data && data.result) || []) {
+      const c = (u.message && u.message.chat) || (u.my_chat_member && u.my_chat_member.chat);
+      if (c && c.id != null && !chats.some((x) => x.id === c.id)) {
+        chats.push({ id: c.id, name: [c.first_name, c.last_name].filter(Boolean).join(' ') || c.username || String(c.id) });
+      }
+    }
+    if (!chats.length) throw new Error('Open your bot in Telegram and tap Start (or send it any message), then press Test again.');
+    const last = chats[chats.length - 1]; // the most recent chat that messaged the bot
+    chatId = String(last.id);
+    chatName = last.name;
+  }
+  const to2 = withTimeout(15_000);
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId, parse_mode: 'HTML', disable_web_page_preview: true,
+        text: '✅ <b>Discogs Deal Watcher</b> is connected. Deal &amp; 💎 rare-gem alerts will arrive here.',
+      }),
+      signal: to2.signal,
+    });
+    const body = await r.json().catch(() => null);
+    if (!r.ok || (body && body.ok === false)) throw new Error('Could not send a test message (' + ((body && body.description) || ('HTTP ' + r.status)) + ').');
+  } finally { to2.done(); }
+  return { ok: true, chatId: String(chatId), name: chatName };
+}
+
+let telegramSetupRunning = false;
+async function setupTelegram(win, { githubToken, botToken, chatId } = {}) {
+  if (telegramSetupRunning) throw new Error('Telegram setup is already running.');
+  telegramSetupRunning = true;
+  const step = (id, state, detail) => { try { win.webContents.send('telegram:progress', { step: id, state, detail }); } catch { /* window gone */ } };
+  try {
+    githubToken = (githubToken || '').trim();
+    botToken = (botToken || '').trim();
+    chatId = (chatId || '').trim();
+    if (!botToken || !chatId) throw new Error('Press Test first so we have your bot token and chat.');
+    if (!githubToken) throw new Error('Paste your GitHub token so this can be saved to your cloud watcher.');
+    const fork = (readSettings().githubRepo || '').trim();
+    if (!fork) throw new Error('Set up 24/7 email alerts first — Telegram alerts run on that same cloud watcher.');
+
+    step('verify', 'busy');
+    const me = await ghReq(githubToken, 'GET', '/user');
+    if (me.status === 401) throw new Error('GitHub rejected the token (401) — use a classic token with the "repo" and "workflow" scopes.');
+    if (me.status !== 200 || !me.data || !me.data.login) throw new Error('Could not reach GitHub (HTTP ' + me.status + ').');
+    step('verify', 'ok', 'GitHub: ' + me.data.login);
+
+    step('secrets', 'busy');
+    let pk = null;
+    for (let i = 0; i < 10 && !pk; i++) {
+      const r = await ghReq(githubToken, 'GET', `/repos/${fork}/actions/secrets/public-key`);
+      if (r.status === 200 && r.data && r.data.key) pk = r.data;
+      else if (r.status === 404) throw new Error('Your cloud copy (' + fork + ') was not found — re-run the email setup, then try again.');
+      else await sleep(2000);
+    }
+    if (!pk) throw new Error('GitHub did not return the encryption key for ' + fork + ' — wait a moment and try again.');
+    for (const [name, value] of Object.entries({ TELEGRAM_BOT_TOKEN: botToken, TELEGRAM_CHAT_ID: chatId })) {
+      const encrypted_value = await encryptSecret(pk.key, value);
+      const r = await ghReq(githubToken, 'PUT', `/repos/${fork}/actions/secrets/${name}`, { encrypted_value, key_id: pk.key_id });
+      if (r.status !== 201 && r.status !== 204) throw new Error('Could not store the ' + name + ' setting (HTTP ' + r.status + ').');
+    }
+    step('secrets', 'ok');
+
+    // Fire a run so Telegram takes effect now, not at the next (heavily delayed) cron tick.
+    step('enable', 'busy');
+    await ghReq(githubToken, 'POST', `/repos/${fork}/actions/workflows/${CRON_WORKFLOW}/dispatches`, { ref: 'main' }).catch(() => { /* non-fatal: the schedule will pick it up */ });
+    step('enable', 'ok');
+
+    writeSettings({ ...readSettings(), telegramConnected: true });
+    step('done', 'ok', fork);
+    return { ok: true, fork };
+  } finally {
+    telegramSetupRunning = false;
+  }
+}
+
+ipcMain.handle('telegram:test', async (e, opts) => {
+  try { return await telegramTest(opts || {}); }
+  catch (err) { return { ok: false, error: err && err.message ? err.message : String(err) }; }
+});
+ipcMain.handle('telegram:setup', async (e, opts) => {
+  try { return await setupTelegram(BrowserWindow.fromWebContents(e.sender), opts || {}); }
+  catch (err) { return { ok: false, error: err && err.message ? err.message : String(err) }; }
+});
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1120, height: 800, minWidth: 720, minHeight: 520,

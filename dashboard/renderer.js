@@ -1007,6 +1007,122 @@ async function runCloudSetup() {
   }
 }
 
+// --- ✈ Telegram push setup ---
+// Telegram alerts are sent by the CLOUD watcher (the fork), so connecting = saving two secrets to it.
+// Flow: paste bot token → Test (resolve chat id + send a test message) → Connect (store on the fork,
+// needs the GitHub token + the cloud email watcher to exist). Test works standalone so the user can
+// verify their bot even before the cloud is set up.
+let tgRunning = false;
+let tgChatId = '';
+
+function tgResetSteps() {
+  document.querySelectorAll('#tg-steps li').forEach((li) => { li.className = ''; li.removeAttribute('data-detail'); });
+}
+
+async function openTelegram() {
+  closeSettings();
+  tgChatId = '';
+  $('tg-token').value = ''; $('tg-github').value = '';
+  $('tg-test-result').textContent = ''; $('tg-test-result').className = 'test-result';
+  $('tg-result').textContent = ''; $('tg-result').className = 'test-result';
+  $('tg-connect-wrap').classList.add('hidden');
+  $('tg-connect').classList.add('hidden');
+  $('tg-steps').classList.add('hidden');
+  tgResetSteps();
+  // Whether the user has a cloud watcher to save the secrets onto (set by the email-alerts setup).
+  let hasFork = false;
+  if (hasApi) { try { const s = await window.api.getSettings(); hasFork = !!(s && s.githubRepo); } catch { /* ignore */ } }
+  if (!hasFork) {
+    $('tg-test-result').textContent = 'Tip: you can test your bot now, but saving it needs the cloud watcher. Set up “24/7 email alerts” first (Settings), then come back here.';
+    $('tg-test-result').className = 'test-result';
+  }
+  $('telegram-modal').classList.remove('hidden');
+  $('tg-token').focus();
+}
+function closeTelegram() { if (!tgRunning) $('telegram-modal').classList.add('hidden'); }
+
+async function runTelegramTest() {
+  const el = $('tg-test-result');
+  if (!hasApi) { el.textContent = 'Demo mode (no Electron bridge).'; el.className = 'test-result bad'; return; }
+  const botToken = $('tg-token').value.trim();
+  if (!botToken) { el.textContent = 'Paste your bot token first (from @BotFather).'; el.className = 'test-result bad'; return; }
+  el.textContent = 'Testing — check Telegram for a message…'; el.className = 'test-result';
+  $('tg-test-btn').disabled = true;
+  try {
+    const r = await window.api.telegramTest({ botToken });
+    if (r && r.ok) {
+      tgChatId = r.chatId;
+      el.textContent = `✓ Test message sent${r.name ? ' to ' + r.name : ''}. Check your Telegram.`;
+      el.className = 'test-result ok';
+      // Reveal the connect step only if there's a cloud watcher to save it to.
+      let hasFork = false;
+      try { const s = await window.api.getSettings(); hasFork = !!(s && s.githubRepo); } catch { /* ignore */ }
+      if (hasFork) {
+        $('tg-connect-wrap').classList.remove('hidden');
+        $('tg-connect').classList.remove('hidden');
+      } else {
+        $('tg-result').textContent = 'Bot works! To make alerts arrive when the app is closed, set up “24/7 email alerts” first (Settings → Set up cloud alerts…), then reopen this to Connect.';
+        $('tg-result').className = 'test-result';
+      }
+    } else {
+      el.textContent = (r && r.error) || 'Test failed.';
+      el.className = 'test-result bad';
+    }
+  } catch (e) {
+    el.textContent = 'Test failed: ' + e.message; el.className = 'test-result bad';
+  } finally {
+    $('tg-test-btn').disabled = false;
+  }
+}
+
+function onTelegramProgress(m) {
+  if (!m || !m.step) return;
+  const li = document.querySelector(`#tg-steps li[data-step="${m.step}"]`);
+  if (!li) return;
+  li.className = m.state === 'ok' ? 'ok' : m.state === 'busy' ? 'busy' : '';
+  if (m.detail) li.setAttribute('data-detail', m.detail);
+}
+
+async function runTelegramSetup() {
+  if (tgRunning) return;
+  const el = $('tg-result');
+  if (!hasApi) { el.textContent = 'Demo mode (no Electron bridge).'; el.className = 'test-result bad'; return; }
+  const githubToken = $('tg-github').value.trim();
+  if (!githubToken) { el.textContent = 'Paste your GitHub token to save this to your cloud watcher.'; el.className = 'test-result bad'; return; }
+  tgRunning = true;
+  $('tg-connect').disabled = true;
+  tgResetSteps();
+  $('tg-steps').classList.remove('hidden');
+  el.textContent = 'Saving to your cloud watcher…'; el.className = 'test-result';
+  try {
+    const r = await window.api.telegramSetup({ githubToken, botToken: $('tg-token').value.trim(), chatId: tgChatId });
+    if (r && r.ok) {
+      el.textContent = '✓ Connected! Telegram alerts are on. Your cloud watcher will push deals here from its next run.';
+      el.className = 'test-result ok';
+      $('tg-github').value = ''; $('tg-token').value = ''; // tokens are never kept around
+      $('tg-connect').classList.add('hidden');
+      setTelegramBadge(true);
+    } else {
+      el.textContent = (r && r.error) || 'Setup failed.'; el.className = 'test-result bad';
+      $('tg-connect').disabled = false;
+    }
+  } catch (e) {
+    el.textContent = 'Setup failed: ' + e.message; el.className = 'test-result bad';
+    $('tg-connect').disabled = false;
+  } finally {
+    tgRunning = false;
+  }
+}
+
+function setTelegramBadge(connected) {
+  const b = $('btn-telegram');
+  if (!b) return;
+  b.classList.toggle('ok', !!connected);
+  b.title = connected
+    ? 'Telegram alerts are connected — click to change'
+    : 'Telegram alerts — get deals instantly on your phone (backup for the email)';
+}
+
 // Decide what to show on launch: the first-run wizard if there are no Discogs creds, otherwise the
 // configured deal source ('scan' by default).
 async function boot() {
@@ -1022,6 +1138,7 @@ async function boot() {
     return;
   }
   let s = null; try { s = await window.api.getSettings(); } catch { s = {}; }
+  setTelegramBadge(!!(s && s.telegramConnected));
   const src = (s && s.sourceType) || 'scan';
   if (src === 'scan') {
     viewMode = 'scan';
@@ -1067,6 +1184,14 @@ window.addEventListener('DOMContentLoaded', () => {
   $('cloud-github-help').addEventListener('click', (e) => { e.preventDefault(); openUrl('https://github.com/settings/tokens/new?scopes=repo,workflow&description=Discogs%20Deal%20Watcher%20cloud'); });
   $('cloud-resend-help').addEventListener('click', (e) => { e.preventDefault(); openUrl('https://resend.com/api-keys'); });
   if (hasApi) window.api.onCloudProgress(onCloudProgress);
+
+  // ✈ Telegram push setup
+  $('btn-telegram').addEventListener('click', openTelegram);
+  $('tg-cancel').addEventListener('click', closeTelegram);
+  $('tg-test-btn').addEventListener('click', runTelegramTest);
+  $('tg-connect').addEventListener('click', runTelegramSetup);
+  $('tg-botfather-help').addEventListener('click', (e) => { e.preventDefault(); openUrl('https://t.me/BotFather'); });
+  if (hasApi) window.api.onTelegramProgress(onTelegramProgress);
 
   // Wizard
   $('wiz-test-btn').addEventListener('click', wizardTest);
