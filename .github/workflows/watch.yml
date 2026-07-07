@@ -59,14 +59,17 @@ jobs:
           SLICE_SIZE: '750'   # priority sweep: cover the WHOLE wantlist (~715) every sweep. At ~1.1s/call one
                               # sweep is ~13-14 min; if the list grows past ~750 the staleness term rolls the
                               # overflow into the next sweep (no copy is starved).
-          RUN_BUDGET_MINUTES: '70'  # keep sweeping back-to-back (emailing after EVERY sweep, gems immediately)
-                              # until ~70 min are spent — GitHub only actually fires this cron every ~75-90 min,
-                              # so one-sweep-per-tick would mean hours of detection latency. Verified live
-                              # (2026-07-05): a 50-min budget ran 4 sweeps of 10.5-13.5 min each; 70 runs ~6 and
-                              # nearly closes the idle gap until the next tick => a just-listed copy is spotted
-                              # within ~11-14 min around the clock EXCEPT the deep-night window (ticks are ~4 h
-                              # apart at night — a bigger budget can't bridge that, only an external trigger or a
-                              # paid always-on host could). Set '0' to restore the old single-sweep behaviour.
+          # Budget depends on how this run was started:
+          #  - schedule (GitHub's own cron): keep sweeping back-to-back for ~70 min (emailing after
+          #    EVERY sweep, gems immediately). GitHub only actually fires this cron every ~75-90 min
+          #    (night gaps up to ~4 h), so one-sweep-per-tick would mean hours of detection latency.
+          #    Verified live (2026-07-05): a 50-min budget ran 4 sweeps of 10.5-13.5 min each.
+          #    This is the self-contained fallback every fork gets for free.
+          #  - workflow_dispatch (external trigger / manual run): ONE sweep (~13-14 min) then exit.
+          #    The owner runs a Cloudflare Worker cron (workspace folder discogs-watch-cron, NOT in
+          #    this repo) that dispatches every 15 min — reliable round-the-clock cadence, so each
+          #    poke should do a single sweep and get out of the way of the next one.
+          RUN_BUDGET_MINUTES: ${{ github.event_name == 'workflow_dispatch' && '0' || '70' }}
           MODE: balanced
           MIN_REFERENCE: '25'      # skip low-value records: VG+ suggestion must be >= EUR25 (kills noise, keeps diamonds)
           SHIPPING_ESTIMATE: '5'   # add EUR5 to the item price; the alert threshold uses the total
