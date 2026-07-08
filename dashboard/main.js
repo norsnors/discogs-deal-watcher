@@ -222,8 +222,9 @@ async function githubHealth(s) {
     if (s.githubToken) headers.authorization = 'Bearer ' + s.githubToken;
     // Scoped to the sweep workflow's runs (a build-mac run can't shadow the heartbeat), and a few of
     // them: the extra runs feed the cron pill's fire history + real-cadence estimate at no extra
-    // request cost (still ONE api.github.com call per poll).
-    const res = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/${CRON_WORKFLOW}/runs?per_page=6`, { headers, signal: to.signal });
+    // request cost (still ONE api.github.com call per poll). Fetch extra (15) because we drop the
+    // 'cancelled' runs below and still want ~6 real ones to show.
+    const res = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/${CRON_WORKFLOW}/runs?per_page=15`, { headers, signal: to.signal });
     // 403/429 with no remaining budget = the unauthenticated rate limit, NOT a real outage — say so
     // so the UI keeps the last-known state instead of falsely flipping to "down".
     if (res.status === 403 || res.status === 429) {
@@ -243,7 +244,11 @@ async function githubHealth(s) {
       runNumber: run.run_number,
       event: run.event,           // schedule | workflow_dispatch | ...
     });
-    const runs = (j.workflow_runs || []).map(mapRun);
+    // Drop 'cancelled' runs: these are Worker pokes (workflow_dispatch) that queued behind a live
+    // budget run and got bumped by the next poke without ever executing — real churn, but they did
+    // NO work (no sweep, no email), so surfacing them as "recent runs" just looks alarming. The
+    // heartbeat + tooltip + cadence should reflect runs that actually ran (or are running).
+    const runs = (j.workflow_runs || []).map(mapRun).filter((r) => r.conclusion !== 'cancelled');
     return { mode: 'github', repo, ok: true, run: runs[0] || null, recent: runs };
   } finally { to.done(); }
 }
