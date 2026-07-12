@@ -155,6 +155,13 @@ function makeStore(dir) {
     },
     getDeals(limit = 200) { return deals.slice(0, limit); },
     countDeals() { return deals.length; },
+    // Restore the deal feed from the committed root deals.json after an Actions-cache eviction —
+    // otherwise a wiped cache would publish an EMPTY deals.json and erase every previously-emailed
+    // deal from the dashboard. Mirrors primeGems: in-memory only, and never overwrites a cache
+    // that already has deals (the cache is always the fresher copy).
+    primeDeals(list) {
+      if (Array.isArray(list) && list.length && !deals.length) deals = list.slice(0, DEALS_CAP);
+    },
 
     // --- rare gems (dashboard feed for the 💎 tab) ---
     addGem(gem) {
@@ -251,6 +258,14 @@ if (require.main === module && process.argv.includes('--selftest')) {
   assert.strictEqual(s3.getGems()[0].id, 'g9', 'an empty store recovers the committed gems');
   s3.primeGems([{ id: 'gX', releaseId: 8 }]);
   assert.strictEqual(s3.getGems()[0].id, 'g9', 'a store that already has gems is never overwritten');
+
+  // primeDeals: same cache-eviction recovery for the deal feed (from the committed root deals.json).
+  s3.primeDeals([{ id: 'd9', releaseId: 9 }]);
+  assert.strictEqual(s3.getDeals()[0].id, 'd9', 'an empty store recovers the committed deals');
+  s3.primeDeals([{ id: 'dX', releaseId: 8 }]);
+  assert.strictEqual(s3.getDeals()[0].id, 'd9', 'a store that already has deals is never overwritten');
+  s3.addDeal({ id: 'd10', releaseId: 10 });
+  assert.strictEqual(s3.getDeals()[0].id, 'd10', 'a new deal lands on top of the recovered feed');
 
   // primeSeed never clobbers a release the cache already has (cache is the fresher copy).
   s2.pushObservation(400, { ts: 9, lowest: 99, numForSale: 1 });

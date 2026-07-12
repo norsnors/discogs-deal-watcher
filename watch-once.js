@@ -68,6 +68,13 @@ async function main() {
     if (g && Array.isArray(g.gems)) store.primeGems(g.gems);
   } catch { /* not committed yet */ }
 
+  // Same recovery for the 💸 deal feed: without it a cache eviction would publish an EMPTY
+  // deals.json, erasing every previously-emailed deal from the dashboard in one sweep.
+  try {
+    const d = JSON.parse(fs.readFileSync(path.join(__dirname, 'deals.json'), 'utf8'));
+    store.primeDeals(d);
+  } catch { /* not committed yet */ }
+
   const client = makeClient({ token: config.token, userAgent: config.userAgent });
   const mailer = makeMailer(config.email);
   // Telegram = the redundant push channel: best-effort (a failure only logs — email keeps the
