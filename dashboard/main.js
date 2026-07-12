@@ -1345,6 +1345,8 @@ ipcMain.handle('telegram:setup', async (e, opts) => {
   catch (err) { return { ok: false, error: err && err.message ? err.message : String(err) }; }
 });
 
+let mainWindow = null;
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1120, height: 800, minWidth: 720, minHeight: 520,
@@ -1353,12 +1355,27 @@ function createWindow() {
     icon: path.join(__dirname, 'assets', 'icon.png'),
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
   });
+  mainWindow = win;
   win.removeMenu();
   win.loadFile('index.html');
   // Show only once painted, to avoid the white flash (same pattern as BPM Tapper).
   win.once('ready-to-show', () => win.show());
 }
 
-app.whenReady().then(createWindow);
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+// Single-instance lock. Every window/dir path (settings.json, last-scan.json, state/) is shared, so
+// two live instances stomp each other's state — one runs a scan and overwrites last-scan.json while
+// the other shows stale data, which reads to the user as the dashboard "jumping back in time". So a
+// second launch must NOT spawn a rival: it just focuses the window that's already open.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+  app.whenReady().then(createWindow);
+  app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+}

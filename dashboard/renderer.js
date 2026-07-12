@@ -824,14 +824,24 @@ async function startScan(opts = {}) {
   $('scan-text').textContent = opts.quick ? 'Ranking your wantlist for a quick scan…' : 'Fetching your wantlist…';
   try {
     const res = await window.api.scrapeRun(opts);
-    viewMode = 'scan';
-    scannedOnce = true;
-    allDeals = (res && res.deals) || [];
-    allNearMisses = (res && res.nearMisses) || [];
-    seenIds = new Set(allDeals.map((d) => d.id));
-    setStatus({ wantlistSize: res ? (res.wantlistTotal ?? res.total) : '—' });
-    refreshGems(); // the scan may have found rare gems / refreshed the zero-stock watch list
-    render();
+    // A BACKGROUND auto-scan in a cloud source (github/server) runs only for its side effects —
+    // refreshing sold-medians (which sharpen the cloud emails) and keeping the cron alive. It must
+    // NOT hijack the view: the cloud feed (now auto-verified live) stays the shown truth, so a
+    // launch never silently "jumps back" to a smaller local-scan snapshot. A MANUAL scan, or an
+    // auto-scan when the user's source already IS local, switches to the scan results as before.
+    if (opts.background) {
+      refreshGems();
+      refresh(); // re-pull + re-verify the cloud feed (medians it just refreshed feed the next sweep)
+    } else {
+      viewMode = 'scan';
+      scannedOnce = true;
+      allDeals = (res && res.deals) || [];
+      allNearMisses = (res && res.nearMisses) || [];
+      seenIds = new Set(allDeals.map((d) => d.id));
+      setStatus({ wantlistSize: res ? (res.wantlistTotal ?? res.total) : '—' });
+      refreshGems(); // the scan may have found rare gems / refreshed the zero-stock watch list
+      render();
+    }
   } catch (e) {
     $('empty').classList.remove('hidden');
     $('empty').textContent = 'Scan failed: ' + e.message;
@@ -855,7 +865,10 @@ async function maybeAutoScan() {
   if (!hrs) return;
   let last; try { last = await window.api.scrapeLast(); } catch { last = null; }
   const ageH = last && last.ts ? (Date.now() - last.ts) / 3600000 : Infinity;
-  if (ageH >= hrs) startScan();
+  // In a cloud source the auto-scan is a background medians refresh — it must not replace the
+  // (auto-verified) cloud view. Only when the user's source IS the local scan does it drive the view.
+  const cloud = s.sourceType === 'github' || s.sourceType === 'server';
+  if (ageH >= hrs) startScan({ background: cloud });
 }
 
 function onScanProgress(m) {
