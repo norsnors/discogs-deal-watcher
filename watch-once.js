@@ -212,7 +212,17 @@ async function main() {
 // lives). gems.json also carries the zero-stock WATCH list (wantlist releases with 0 copies for sale)
 // so the dashboard's 💎 tab can show what's being waited on, not just what already appeared.
 function publishDeals(store, wantlist) {
-  fs.writeFileSync(path.join(__dirname, 'deals.json'), JSON.stringify(store.getDeals(200)));
+  // Stamp each deal with the release's LATEST observation (already in the store — zero extra API
+  // calls). A deal card is a moment-in-time alert; the best ones sell within hours, after which the
+  // card shows a price that no longer exists. With `current` the dashboard can mark a deal whose
+  // copy is gone (current lowest is above the alerted price, or nothing for sale) as "likely sold"
+  // instead of silently advertising a dead price.
+  const deals = store.getDeals(200).map((d) => {
+    const obs = store.lastObservation(d.releaseId);
+    if (!obs || !(obs.ts > (d.ts || 0))) return d;
+    return { ...d, current: { lowest: obs.lowest ?? null, numForSale: obs.numForSale ?? null, ts: obs.ts } };
+  });
+  fs.writeFileSync(path.join(__dirname, 'deals.json'), JSON.stringify(deals));
   try {
     fs.writeFileSync(path.join(__dirname, 'gems.json'), JSON.stringify({ ts: Date.now(), gems: store.getGems(100), zeroWatch: zeroWatch(store, wantlist) }));
   } catch (e) { console.log('Could not write gems.json:', e.message); }

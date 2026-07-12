@@ -111,6 +111,18 @@ function ago(ts) {
 
 const shipVal = () => parseFloat($('shipEst').value) || 0;
 
+// A cloud deal is a moment-in-time alert; the copy often sells within hours. The cloud sweep stamps
+// each published deal with the release's LATEST observation (`current`). When that shows the lowest
+// price is now clearly ABOVE the alerted price — or nothing is for sale at all — the alerted copy is
+// gone, and the card should say so instead of advertising a dead price. Scan deals never carry
+// `current` (they're live by definition), so this is naturally cloud-only.
+function dealGone(d) {
+  if (!d.current || d.lowest == null) return false;
+  const cur = d.current;
+  if (cur.lowest == null || cur.numForSale === 0) return true;
+  return cur.lowest > d.lowest * 1.05 + 0.5;
+}
+
 // Attach shipping-aware totals + a ranking score to a deal. When the deal carries REAL per-copy
 // shipping (a scan-confirmed copy), use it (incl. €0 = free); otherwise fall back to the slider.
 function enrich(d) {
@@ -127,7 +139,9 @@ function enrich(d) {
   if (d.conditionConfirmed) score += 14;           // a KNOWN-VG+ copy beats a price-guess
   else { if (d.pricedAsWorn) score -= 12; if (d.suspicious) score -= 5; }
   if (d.cheapVgPlusCount > 1) score += Math.min(d.cheapVgPlusCount, 8) * 2; // a cluster = real drop, low risk
-  return Object.assign({}, d, { _ship: ship, _shipReal: shipReal, _total: total, _eff: eff, _savings: savings, _score: score });
+  const gone = dealGone(d);
+  if (gone) score -= 60; // a dead price should never outrank a live deal in Best-first
+  return Object.assign({}, d, { _ship: ship, _shipReal: shipReal, _total: total, _eff: eff, _savings: savings, _score: score, _gone: gone });
 }
 
 // The condition chip. For a scan-confirmed deal it shows the REAL media grade read off the live
@@ -206,7 +220,10 @@ function card(d) {
   const alt = (d.altGrade && d.altPrice != null)
     ? `<div class="note">↑ or ${money(d.altPrice, d.currency)} for a ${esc(gradeShort(d.altGrade))} copy${d.altUrl ? ` <a class="altlink" data-url="${esc(d.altUrl)}" href="#">view</a>` : ''}</div>` : '';
   const buyLabel = d.listingUrl ? 'Buy this copy on Discogs &rarr;' : 'View &amp; buy on Discogs &rarr;';
-  return `<article class="card${d.freshListing ? ' is-fresh' : ''}${d.conditionConfirmed ? ' is-verified' : ''}${isHidden ? ' is-hidden' : ''}">
+  // The alerted copy is gone (sold/delisted since the alert) — say so, plainly.
+  const gone = d._gone
+    ? `<span class="tag gone" title="The cloud watcher's latest check shows this price no longer exists — the copy likely sold since the alert">⌛ likely sold — ${d.current && d.current.lowest != null ? `cheapest is now ${money(d.current.lowest, d.currency)}` : 'no copies for sale'}</span>` : '';
+  return `<article class="card${d.freshListing ? ' is-fresh' : ''}${d.conditionConfirmed ? ' is-verified' : ''}${isHidden ? ' is-hidden' : ''}${d._gone ? ' is-gone' : ''}">
     ${dismissBtn}
     <span class="when">${viewMode === 'scan' ? 'live' : ago(d.ts)}</span>
     ${thumb}
@@ -223,7 +240,7 @@ function card(d) {
       ${cluster}
       ${worn}
       ${alt}
-      <div class="meta">${fresh}${conditionChip(d)}${ships}</div>
+      <div class="meta">${gone}${fresh}${conditionChip(d)}${ships}</div>
       <button class="buy" data-url="${esc(d.url)}">${buyLabel}</button>
     </div>
   </article>`;

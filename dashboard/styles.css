@@ -211,6 +211,10 @@ input[type="range"] { accent-color: var(--accent); }
 .card.is-fresh { border-color: #2c6b46; box-shadow: 0 0 0 1px #2ecc7133, 0 6px 18px -8px #1fae5e55; }
 /* A scan-confirmed (condition-verified) deal gets a subtle green left edge. */
 .card.is-verified { border-left: 3px solid var(--green); }
+/* The alerted copy is gone (sold/delisted since the alert): dim the card + strike the dead price. */
+.tag.gone { color: var(--amber); border-color: #5a4a17; font-weight: 650; }
+.card.is-gone { opacity: 0.55; }
+.card.is-gone .price, .card.is-gone .discount { text-decoration: line-through; text-decoration-thickness: 1.5px; }
 .card .buy {
   display: inline-block; margin-top: 12px; text-decoration: none; cursor: pointer;
   background: var(--green-deep); color: #fff; padding: 8px 14px; border-radius: 8px;
