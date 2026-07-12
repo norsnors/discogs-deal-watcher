@@ -220,9 +220,9 @@ function card(d) {
   const alt = (d.altGrade && d.altPrice != null)
     ? `<div class="note">↑ or ${money(d.altPrice, d.currency)} for a ${esc(gradeShort(d.altGrade))} copy${d.altUrl ? ` <a class="altlink" data-url="${esc(d.altUrl)}" href="#">view</a>` : ''}</div>` : '';
   const buyLabel = d.listingUrl ? 'Buy this copy on Discogs &rarr;' : 'View &amp; buy on Discogs &rarr;';
-  // The alerted copy is gone (sold/delisted since the alert) — say so, plainly.
+  // The alerted price is gone from the marketplace — state the fact, no guessing about why.
   const gone = d._gone
-    ? `<span class="tag gone" title="The cloud watcher's latest check shows this price no longer exists — the copy likely sold since the alert">⌛ likely sold — ${d.current && d.current.lowest != null ? `cheapest is now ${money(d.current.lowest, d.currency)}` : 'no copies for sale'}</span>` : '';
+    ? `<span class="tag gone" title="The cloud watcher's latest check shows this price is no longer on the marketplace">⌛ no longer listed — ${d.current && d.current.lowest != null ? `cheapest is now ${money(d.current.lowest, d.currency)}` : 'no copies for sale'}</span>` : '';
   return `<article class="card${d.freshListing ? ' is-fresh' : ''}${d.conditionConfirmed ? ' is-verified' : ''}${isHidden ? ' is-hidden' : ''}${d._gone ? ' is-gone' : ''}">
     ${dismissBtn}
     <span class="when">${viewMode === 'scan' ? 'live' : ago(d.ts)}</span>
