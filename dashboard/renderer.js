@@ -111,16 +111,16 @@ function ago(ts) {
 
 const shipVal = () => parseFloat($('shipEst').value) || 0;
 
-// A cloud deal is a moment-in-time alert; the copy often sells within hours. The cloud sweep stamps
-// each published deal with the release's LATEST observation (`current`). When that shows the lowest
-// price is now clearly ABOVE the alerted price — or nothing is for sale at all — the alerted copy is
-// gone, and the card should say so instead of advertising a dead price. Scan deals never carry
-// `current` (they're live by definition), so this is naturally cloud-only.
+// "No longer listed" means exactly that: the release has NO copies for sale right now — not merely
+// that the price rose since the alert. A copy that's still there at a higher price is upgraded to
+// that price (see applyVerify) and left to the % slider, so cloud and scan agree on what's a deal.
+// (Earlier this also fired when the lowest price crept above the alerted price, which wrongly exiled
+// still-buyable copies to history — and made them "reappear" the moment a scan re-evaluated them.)
+// Scan deals never carry `current` (they're live by definition), so this is naturally cloud-only.
 function dealGone(d) {
-  if (!d.current || d.lowest == null) return false;
+  if (!d.current) return false;
   const cur = d.current;
-  if (cur.lowest == null || cur.numForSale === 0) return true;
-  return cur.lowest > d.lowest * 1.05 + 0.5;
+  return cur.numForSale === 0 || cur.lowest == null;
 }
 
 // --- Automatic live verification of the cloud feed --------------------------
@@ -153,21 +153,22 @@ function applyVerify(results) {
     const r = results[d.releaseId];
     if (!r || r.error) return d; // unverifiable -> keep the honest API-only estimate
     const cur = r.cheapest;
-    // Lowest bare item price on the live marketplace (cheapest by TOTAL can be a dearer item with
-    // free shipping) — this is what decides whether the alerted price still exists.
-    const lowestNow = r.lowestPrice != null ? r.lowestPrice : (cur ? cur.price : null);
-    // `current` feeds dealGone() + the "no longer listed" badge — fresher than the cloud's stamp.
-    const base = { ...d, verified: true, current: { lowest: lowestNow, numForSale: r.copies ?? 0, ts: r.ts } };
-    const stillListed = cur && d.lowest != null && lowestNow != null && lowestNow <= d.lowest * 1.05 + 0.5;
-    if (!stillListed) return base; // dealGone(base) is now true -> history section
+    const copies = r.copies || 0;
+    // `current` feeds dealGone() + the badge. numForSale is what decides "no longer listed": only a
+    // release with ZERO copies is history. A copy that merely got pricier is upgraded below and left
+    // to the % slider — the same call a scan makes, so the two views can't diverge.
+    const base = { ...d, verified: true, current: { lowest: cur ? cur.price : null, numForSale: copies, ts: r.ts } };
+    if (!cur || copies === 0) return base; // nothing for sale -> history
     // Upgrade the card to the LIVE cheapest copy: real grade, real shipping, direct listing link.
+    // If it's no longer cheap enough vs the reference, enrich()'s recomputed discount drops it below
+    // the % slider and it falls out naturally (exactly as a scan would treat it) — no dead price shown.
     const alt = (r.bestVgPlus && (!cur.itemId || r.bestVgPlus.itemId !== cur.itemId)) ? r.bestVgPlus : null;
     return {
       ...base,
       lowest: cur.price, currency: cur.currency || d.currency,
       conditionConfirmed: !!cur.media, mediaCondition: cur.media, sleeveCondition: cur.sleeve,
       shipping: cur.shipping, shippingSource: cur.shippingSource, shipsFrom: cur.shipsFrom || d.shipsFrom,
-      vgPlusCount: r.vgPlusCount, copiesSeen: r.copies,
+      vgPlusCount: r.vgPlusCount, copiesSeen: copies,
       listingUrl: cur.url || d.listingUrl || null, url: cur.url || d.url,
       altGrade: alt ? alt.media : null, altPrice: alt ? (alt.price != null ? alt.price + (alt.shipping || 0) : null) : null, altUrl: alt ? alt.url : null,
     };
