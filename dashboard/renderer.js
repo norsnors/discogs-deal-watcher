@@ -123,6 +123,70 @@ function dealGone(d) {
   return cur.lowest > d.lowest * 1.05 + 0.5;
 }
 
+// --- Automatic live verification of the cloud feed --------------------------
+// On every refresh the visible cloud deals + gems are re-checked against the LIVE marketplace
+// through the same residential-IP pipeline the scan uses (main.js caches results 30 min, so the
+// 30s poll is free). A verified card gets the copy's REAL condition + shipping + a direct buy
+// link — so "VG+ only" and Best-first mean the same thing everywhere — and a card whose price no
+// longer exists moves to the collapsed history section instead of posing as a live deal.
+let verifyInfo = { running: false, done: 0, total: 0 };
+let verifyBusy = false;
+let goneHistoryOpen = false; // remember the <details> state across re-renders
+
+async function maybeVerify() {
+  if (!hasApi || viewMode === 'scan' || scanning || verifyBusy) return;
+  const items = [
+    ...allDeals.map((d) => ({ releaseId: d.releaseId, currency: d.currency })),
+    ...((gemsData.gems || []).map((g) => ({ releaseId: g.releaseId, currency: g.currency }))),
+  ].filter((x) => x.releaseId != null);
+  if (!items.length) return;
+  verifyBusy = true;
+  try {
+    const res = await window.api.verifyDeals(items);
+    if (res && res.results && Object.keys(res.results).length) applyVerify(res.results);
+  } catch { /* verification is best-effort — the cards just keep their API-only estimates */ }
+  finally { verifyBusy = false; }
+}
+
+function applyVerify(results) {
+  allDeals = allDeals.map((d) => {
+    const r = results[d.releaseId];
+    if (!r || r.error) return d; // unverifiable -> keep the honest API-only estimate
+    const cur = r.cheapest;
+    // Lowest bare item price on the live marketplace (cheapest by TOTAL can be a dearer item with
+    // free shipping) — this is what decides whether the alerted price still exists.
+    const lowestNow = r.lowestPrice != null ? r.lowestPrice : (cur ? cur.price : null);
+    // `current` feeds dealGone() + the "no longer listed" badge — fresher than the cloud's stamp.
+    const base = { ...d, verified: true, current: { lowest: lowestNow, numForSale: r.copies ?? 0, ts: r.ts } };
+    const stillListed = cur && d.lowest != null && lowestNow != null && lowestNow <= d.lowest * 1.05 + 0.5;
+    if (!stillListed) return base; // dealGone(base) is now true -> history section
+    // Upgrade the card to the LIVE cheapest copy: real grade, real shipping, direct listing link.
+    const alt = (r.bestVgPlus && (!cur.itemId || r.bestVgPlus.itemId !== cur.itemId)) ? r.bestVgPlus : null;
+    return {
+      ...base,
+      lowest: cur.price, currency: cur.currency || d.currency,
+      conditionConfirmed: !!cur.media, mediaCondition: cur.media, sleeveCondition: cur.sleeve,
+      shipping: cur.shipping, shippingSource: cur.shippingSource, shipsFrom: cur.shipsFrom || d.shipsFrom,
+      vgPlusCount: r.vgPlusCount, copiesSeen: r.copies,
+      listingUrl: cur.url || d.listingUrl || null, url: cur.url || d.url,
+      altGrade: alt ? alt.media : null, altPrice: alt ? (alt.price != null ? alt.price + (alt.shipping || 0) : null) : null, altUrl: alt ? alt.url : null,
+    };
+  });
+  if (gemsData.gems && gemsData.gems.length) {
+    gemsData = {
+      ...gemsData,
+      gems: gemsData.gems.map((g) => {
+        const r = results[g.releaseId];
+        if (!r || r.error) return g;
+        const cur = r.cheapest;
+        return { ...g, verified: true, gone: !cur, currentLowest: cur ? cur.price : null, currentMedia: cur ? cur.media : null };
+      }),
+    };
+    updateGemsBadge();
+  }
+  render();
+}
+
 // Attach shipping-aware totals + a ranking score to a deal. When the deal carries REAL per-copy
 // shipping (a scan-confirmed copy), use it (incl. €0 = free); otherwise fall back to the slider.
 function enrich(d) {
@@ -309,13 +373,19 @@ function gemCard(g) {
   const appeared = g.numForSale === 1 ? 'first copy appeared' : `${esc(String(g.numForSale))} copies appeared`;
   const ref = g.reference != null
     ? `<div class="ref">worth ~${money(g.reference, g.currency)} (${REF_LABEL[g.referenceSource] || 'reference'})</div>` : '';
-  return `<article class="card is-gem">
+  // Live verification (same pipeline as the deals): still for sale, and in what condition?
+  const live = g.gone
+    ? `<span class="tag gone" title="The live marketplace check no longer finds any copy for sale">⌛ no longer listed</span>`
+    : (g.verified && g.currentMedia
+        ? `<span class="tag good" title="Confirmed from the live marketplace listing">✓ media ${esc(gradeShort(g.currentMedia))}${g.currentLowest != null && g.currentLowest !== g.lowest ? ` · now ${money(g.currentLowest, g.currency)}` : ''}</span>`
+        : '');
+  return `<article class="card is-gem${g.gone ? ' is-gone' : ''}">
     <span class="when">${g.ts ? ago(g.ts) : ''}</span>
     ${thumb}
     <div class="body">
       <p class="title">${esc(g.title || 'Release ' + g.releaseId)}</p>
       <p class="artist">${esc(g.artist || '')}${g.year ? ` · ${esc(String(g.year))}` : ''}</p>
-      <div class="meta"><span class="tag gem">💎 was 0 for sale — ${appeared}</span></div>
+      <div class="meta"><span class="tag gem">💎 was 0 for sale — ${appeared}</span>${live}</div>
       <div class="price-row"><span class="price gem-price">${money(g.lowest, g.currency)}</span><span class="gem-ask">asking price — unfiltered</span></div>
       ${ref}
       <button class="buy gembuy" data-url="${esc(g.url)}">View &amp; buy on Discogs &rarr;</button>
@@ -403,6 +473,7 @@ async function refreshGems() {
     notifyNewGems(gemsData.gems);
     updateGemsBadge();
     if (activeTab === 'gems') render();
+    maybeVerify(); // gems join the same live listings check (cached in main, usually free)
   } catch { /* keep the last known gems — the deals path surfaces connectivity problems */ }
 }
 
@@ -465,6 +536,10 @@ function render() {
   // exactly why a deal you were emailed can be invisible here. Surface the number so it's never silent.
   const vgHidden = $('vgPlusOnly').checked ? Math.max(0, applyFilters(enriched, { ignoreVg: true }).length - deals.length) : 0;
   deals = sortDeals(deals, $('sortBy').value);
+  // Cards whose price no longer exists on the marketplace are history, not deals: they move to a
+  // collapsed section at the bottom instead of sitting (struck-through) between the live cards.
+  const goneDeals = deals.filter((d) => d._gone);
+  deals = deals.filter((d) => !d._gone);
   // Near-misses: opt-in, scan-only. Rendered below the deals with the reason each didn't qualify.
   const showMiss = $('showNearMiss').checked && viewMode === 'scan' && allNearMisses.length > 0;
   const misses = showMiss ? filterNearMisses(allNearMisses) : [];
@@ -474,8 +549,9 @@ function render() {
   const hiddenNote = hiddenCount ? ` · ${hiddenCount} hidden` : '';
   const vgNote = vgHidden ? ` · ${vgHidden} hidden by “VG+ only”` : '';
   $('pill-deals').textContent = `${allDeals.length} deal${allDeals.length === 1 ? '' : 's'}`;
-  $('resultCount').textContent = deals.length ? `${deals.length} of ${allDeals.length}${hiddenNote}${vgNote}${viewMode === 'scan' ? ' · live scan' : ''}` : '';
-  if (!deals.length && !misses.length) {
+  const verifyNote = verifyInfo.running ? ` · ✓ checking listings ${Math.min(verifyInfo.done + 1, verifyInfo.total)}/${verifyInfo.total}…` : '';
+  $('resultCount').textContent = (deals.length || verifyNote) ? `${deals.length} of ${allDeals.length}${hiddenNote}${vgNote}${viewMode === 'scan' ? ' · live scan' : ''}${verifyNote}` : '';
+  if (!deals.length && !misses.length && !goneDeals.length) {
     wrap.innerHTML = '';
     empty.classList.remove('hidden');
     empty.textContent = allDeals.length
@@ -495,7 +571,12 @@ function render() {
     html += `<div class="nearmiss-head">↓ Near-misses — looked cheap but didn’t qualify (${misses.length})</div>`;
     html += misses.map(nearMissCard).join('');
   }
+  if (goneDeals.length) {
+    html += `<details class="gone-history"${goneHistoryOpen ? ' open' : ''}><summary>⌛ No longer listed — kept as history (${goneDeals.length})</summary><div class="gone-grid">${goneDeals.map(card).join('')}</div></details>`;
+  }
   wrap.innerHTML = html;
+  const hist = wrap.querySelector('.gone-history');
+  if (hist) hist.addEventListener('toggle', () => { goneHistoryOpen = hist.open; });
   wrap.querySelectorAll('.buy').forEach((b) => b.addEventListener('click', () => openUrl(b.getAttribute('data-url'))));
   wrap.querySelectorAll('.altlink').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); openUrl(a.getAttribute('data-url')); }));
   wrap.querySelectorAll('.dismiss').forEach((b) => b.addEventListener('click', () => {
@@ -707,6 +788,7 @@ async function refresh() {
     notifyNew(allDeals);
     setStatus(status || {});
     render();
+    maybeVerify(); // fire-and-forget: live-check the visible cards (cached in main, so usually free)
   } catch (e) {
     refreshHealth(); // let the badge show the authoritative service state (down/rate-limited/etc.)
     $('empty').classList.remove('hidden');
@@ -1228,6 +1310,10 @@ window.addEventListener('DOMContentLoaded', () => {
   $('shipEst').addEventListener('input', () => { $('shipEstVal').textContent = '€' + $('shipEst').value; render(); });
 
   if (hasApi) window.api.onScrapeProgress(onScanProgress);
+  if (hasApi && window.api.onVerifyProgress) window.api.onVerifyProgress((m) => {
+    verifyInfo = { running: m.phase === 'verifying', done: m.done || 0, total: m.total || 0 };
+    if (activeTab === 'deals' && viewMode !== 'scan') render(); // updates the "checking listings n/m" note
+  });
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
 
   boot();                         // first-run wizard, last scan, or cloud poll — and lights up the badge

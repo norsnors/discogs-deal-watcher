@@ -42,4 +42,12 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('scrape:progress', h);
     return () => ipcRenderer.removeListener('scrape:progress', h);
   },
+  // Automatic verification of the cloud feed: live listings check (still buyable? real condition +
+  // shipping?) for the visible deals/gems. Cached in main; safe to call on every refresh.
+  verifyDeals: (items) => ipcRenderer.invoke('verify:run', items),
+  onVerifyProgress: (cb) => {
+    const h = (_e, m) => cb(m);
+    ipcRenderer.on('verify:progress', h);
+    return () => ipcRenderer.removeListener('verify:progress', h);
+  },
 });

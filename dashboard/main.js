@@ -927,6 +927,88 @@ function lastScan() {
 }
 
 // ---------------------------------------------------------------------------
+// Auto-verification of the cloud feed — "is this card still buyable, and in what condition?"
+// ---------------------------------------------------------------------------
+// A cloud deal is an API-only, moment-in-time alert: no condition, estimated shipping, and the copy
+// may have sold since. This re-checks the releases on the visible cloud feed through the SAME
+// residential-IP browser pipeline the local scan uses (one sell-page navigation + the same-origin
+// listings JSON per release), so every card shows live, condition-confirmed data — automatically,
+// no button. Results are cached (VERIFY_TTL_MS) so the renderer's 30s deals poll costs nothing;
+// a release is re-scraped at most twice an hour. ~13 releases ≈ under a minute, GET-only, paced.
+let verifyRunning = false;
+const VERIFY_TTL_MS = 30 * 60 * 1000;
+const verifyCache = new Map(); // releaseId -> { ts, cheapest, bestVgPlus, copies, vgPlusCount, error }
+
+// Trim a selectByCondition copy to the fields the renderer needs (plus a direct buy link).
+const trimCopy = (c) => (c ? {
+  itemId: c.itemId ?? null, price: c.price ?? null, currency: c.currency || null,
+  media: c.media || null, sleeve: c.sleeve || null,
+  shipping: c.shipping ?? null, shippingSource: c.shippingSource || null,
+  shipsFrom: c.shipsFrom || null,
+  url: c.url || (c.itemId ? `https://www.discogs.com/sell/item/${c.itemId}` : null),
+} : null);
+
+async function runVerify(win, items) {
+  const send = (m) => { try { win.webContents.send('verify:progress', m); } catch { /* window gone */ } };
+  const wanted = [];
+  const seen = new Set();
+  for (const it of (Array.isArray(items) ? items : [])) {
+    const id = it && it.releaseId;
+    if (id == null || seen.has(id)) continue;
+    seen.add(id);
+    wanted.push({ releaseId: id, currency: it.currency || 'EUR' });
+  }
+  const results = {};
+  const stale = [];
+  const now = Date.now();
+  for (const w of wanted) {
+    const c = verifyCache.get(w.releaseId);
+    if (c && now - c.ts < VERIFY_TTL_MS) results[w.releaseId] = c;
+    else stale.push(w);
+  }
+  // Never contend with a running scan (its results are live anyway) or a second verify pass —
+  // cached results still go back so the renderer keeps whatever is already known.
+  if (!stale.length || scrapeRunning || verifyRunning) return { results, checked: 0 };
+  verifyRunning = true;
+  let cfWin = null;
+  let checked = 0;
+  try {
+    const { engine } = loadWatcher();
+    cfWin = new BrowserWindow({ show: false, width: 1200, height: 900, webPreferences: { images: false } });
+    cfWin.loadURL('https://www.discogs.com/', { userAgent: DISCOGS_UA }).catch(() => {});
+    scrapeAbort = false; // waitFor consults this global; a previously-aborted scan must not poison the check
+    const cap = stale.slice(0, 40); // sanity cap — the visible feed is ~a dozen releases
+    for (const w of cap) {
+      if (scrapeRunning) break; // a scan just started — get out of its way; the rest re-checks later
+      send({ phase: 'verifying', done: checked, total: cap.length });
+      const r = { releaseId: w.releaseId, ts: Date.now(), error: null, copies: null, vgPlusCount: null, cheapest: null, bestVgPlus: null };
+      try {
+        const data = await loadReleaseData(cfWin, w.releaseId, w.currency, { needSold: false });
+        if (Array.isArray(data.listings)) {
+          const pick = engine.selectByCondition(data.listings, { minCondition: 'Very Good Plus (VG+)' });
+          r.copies = pick.totalCount != null ? pick.totalCount : data.listings.length;
+          r.vgPlusCount = pick.acceptableCount != null ? pick.acceptableCount : null;
+          // cheapestAny is ordered by TOTAL (price+shipping) — the best actual buy. For the
+          // "is the alerted price still listed?" question we need the lowest bare ITEM price.
+          r.lowestPrice = data.listings.reduce((m, l) => (l.price != null && l.price > 0 && (m == null || l.price < m) ? l.price : m), null);
+          r.cheapest = trimCopy(pick.cheapestAny);
+          r.bestVgPlus = trimCopy(pick.best);
+        } else r.error = data.cleared ? 'listings' : 'cloudflare';
+      } catch (e) { r.error = String((e && e.message) || e); }
+      verifyCache.set(w.releaseId, r);
+      results[w.releaseId] = r;
+      checked++;
+      await sleep(800); // gentle pacing between releases — a small, occasional sweep
+    }
+    send({ phase: 'done', done: checked, total: cap.length });
+    return { results, checked };
+  } finally {
+    verifyRunning = false;
+    if (cfWin) { try { cfWin.destroy(); } catch { /* already gone */ } }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Discogs account config — written by the first-run setup wizard.
 // ---------------------------------------------------------------------------
 // Lives in config.json (dataDir): the same shape watcher.js loadConfig() reads, so a packaged
@@ -990,6 +1072,7 @@ ipcMain.handle('status:get', () => getStatus());
 ipcMain.handle('health:get', () => getServiceHealth());
 ipcMain.handle('open:external', (_e, url) => { if (/^https?:\/\//.test(url)) shell.openExternal(url); });
 ipcMain.handle('scrape:run', (e, opts) => runScrape(BrowserWindow.fromWebContents(e.sender), opts || {}));
+ipcMain.handle('verify:run', (e, items) => runVerify(BrowserWindow.fromWebContents(e.sender), items || []));
 ipcMain.handle('scrape:cancel', () => { scrapeAbort = true; return true; });
 ipcMain.handle('scrape:last', () => lastScan());
 // Medians push status — null hides the badge (packaged installs never push: there's no repo; and

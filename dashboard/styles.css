@@ -211,6 +211,17 @@ input[type="range"] { accent-color: var(--accent); }
 .card.is-fresh { border-color: #2c6b46; box-shadow: 0 0 0 1px #2ecc7133, 0 6px 18px -8px #1fae5e55; }
 /* A scan-confirmed (condition-verified) deal gets a subtle green left edge. */
 .card.is-verified { border-left: 3px solid var(--green); }
+/* Collapsed history for cards whose price no longer exists — they're not deals anymore. */
+.gone-history { grid-column: 1 / -1; margin-top: 6px; }
+.gone-history summary {
+  cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 600;
+  padding: 8px 4px; border-top: 1px solid var(--line); user-select: none;
+}
+.gone-history summary:hover { color: var(--text); }
+.gone-history .gone-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  gap: 14px; padding-top: 10px;
+}
 /* The alerted copy is gone (sold/delisted since the alert): dim the card + strike the dead price. */
 .tag.gone { color: var(--amber); border-color: #5a4a17; font-weight: 650; }
 .card.is-gone { opacity: 0.55; }
