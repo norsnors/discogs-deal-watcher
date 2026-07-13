@@ -45,19 +45,6 @@ let seenIds = new Set();
 let firstLoad = true;
 let viewMode = 'cloud';   // 'cloud' | 'scan'
 
-// The user's view CHOICE (manual scan -> 'scan', ↻ refresh -> 'cloud') is persisted as
-// settings.lastView and restored by boot(), so a restart brings back exactly what was on screen —
-// closing and reopening the app must never silently switch what the deals tab shows.
-function setViewMode(mode) {
-  viewMode = mode;
-  if (!hasApi) return;
-  (async () => {
-    try {
-      const cur = await window.api.getSettings();
-      if (cur.lastView !== mode) await window.api.saveSettings({ ...cur, lastView: mode });
-    } catch { /* persistence is best-effort; the session keeps working either way */ }
-  })();
-}
 let activeTab = 'deals';  // 'deals' | 'gems' — the 💎 Rare tab shows rare appearances + the zero-stock watch list
 let gemsData = { ts: null, gems: [], zeroWatch: [] };
 let seenGemIds = new Set();
@@ -148,9 +135,12 @@ let verifyBusy = false;
 let goneHistoryOpen = false; // remember the <details> state across re-renders
 
 async function maybeVerify() {
-  if (!hasApi || viewMode === 'scan' || scanning || verifyBusy) return;
+  if (!hasApi || scanning || verifyBusy) return;
+  // In the (default) scan view the deal cards are already live/condition-verified by the scan
+  // itself — only the 💎 gems need the live check. Cloud deal cards (if that view is ever shown)
+  // get the full treatment.
   const items = [
-    ...allDeals.map((d) => ({ releaseId: d.releaseId, currency: d.currency })),
+    ...(viewMode === 'cloud' ? allDeals.map((d) => ({ releaseId: d.releaseId, currency: d.currency })) : []),
     ...((gemsData.gems || []).map((g) => ({ releaseId: g.releaseId, currency: g.currency }))),
   ].filter((x) => x.releaseId != null);
   if (!items.length) return;
@@ -163,7 +153,9 @@ async function maybeVerify() {
 }
 
 function applyVerify(results) {
-  allDeals = allDeals.map((d) => {
+  // Scan deals are already live data — never overwrite them with a (release-level) verify result;
+  // only cloud alert cards get upgraded. Gems are handled below in every view.
+  if (viewMode === 'cloud') allDeals = allDeals.map((d) => {
     const r = results[d.releaseId];
     if (!r || r.error) return d; // unverifiable -> keep the honest API-only estimate
     const cur = r.cheapest;
@@ -285,7 +277,7 @@ function card(d) {
     : (d._ship > 0 ? `${itemTxt} + ${money(d._ship, d.currency)} shipping (est.)` : `${itemTxt} · shipping unknown`);
   const shipTitle = d._shipReal
     ? (d.shippingSource === 'base' ? 'Real shipping (seller&#39;s flat rate, from the live listing)' : 'Real shipping to your location, from the live listing')
-    : 'Estimated shipping (slider) — this deal has no per-copy shipping; run ⚡ Scan now for the real amount';
+    : 'Estimated shipping (slider) — this deal has no per-copy shipping; run ⚡ Full scan for the real amount';
   const save = d._savings != null ? ` · save ${money(d._savings, d.currency)}` : '';
   const forSale = d.vgPlusCount != null
     ? `${esc(String(d.vgPlusCount))} VG+ of ${esc(String(d.numForSale ?? '?'))} for sale`
@@ -576,8 +568,8 @@ function render() {
       : (viewMode === 'scan'
           ? (scannedOnce
               ? 'Scan finished — no confirmed VG+ copies meet your discount threshold right now.'
-              : 'No scan yet. Hit ⚡ Scan now to sweep your wantlist for bargains (~13 min).')
-          : 'No deals yet — the watcher fills this in as cheap copies appear. Or hit ⚡ Scan now.');
+              : 'No scan yet. Hit ⚡ Full scan to sweep your wantlist for verified-VG+ bargains.')
+          : 'No deals yet — hit ⚡ Full scan.');
     return;
   }
   empty.classList.add('hidden');
@@ -639,7 +631,7 @@ function setServiceBadge(h) {
     const last = h.lastScanAt;
     state = 'idle'; text = 'Local';
     sub = last ? `scanned ${ago(last)}` : 'no scan yet';
-    title = 'Local-scan mode — no cloud watcher. Use ⚡ Scan now to refresh deals.';
+    title = 'Local-scan mode — no cloud watcher. Use ⚡ Full scan to refresh deals.';
   } else { // github
     const run = (h.ok && h.run) ? h.run : (h.rateLimited ? lastGithubRun : null);
     if (!run) {
@@ -807,7 +799,7 @@ async function refresh() {
   } catch (e) {
     refreshHealth(); // let the badge show the authoritative service state (down/rate-limited/etc.)
     $('empty').classList.remove('hidden');
-    $('empty').textContent = 'Cannot reach the watcher: ' + e.message + '  — or just hit ⚡ Scan now.';
+    $('empty').textContent = 'Cannot reach the watcher: ' + e.message + '  — or just hit ⚡ Full scan.';
     $('deals').innerHTML = '';
   }
 }
@@ -822,10 +814,8 @@ function fmtEta(remaining) {
 function setScanUI(on) {
   scanning = on;
   $('scanbar').classList.toggle('hidden', !on);
-  $('btn-scan').disabled = on;
-  $('btn-quickscan').disabled = on;
   $('btn-fullscan').disabled = on;
-  $('btn-scan').textContent = on ? '⏳ Scanning…' : '⚡ Scan now';
+  $('btn-fullscan').textContent = on ? '⏳ Scanning…' : '⚡ Full scan';
   // While a scan runs the badge says "Scanning…"; once it ends, re-check the real service state.
   if (on) setServiceBadge(lastHealth); else refreshHealth();
 }
@@ -857,7 +847,7 @@ async function startScan(opts = {}) {
       refreshGems();
       refresh(); // no-op in scan view; otherwise re-pull + re-verify the cloud feed
     } else {
-      setViewMode('scan');
+      viewMode = 'scan';
       scannedOnce = true;
       allDeals = (res && res.deals) || [];
       allNearMisses = (res && res.nearMisses) || [];
@@ -1062,7 +1052,7 @@ async function wizardSave() {
   await window.api.saveConfig(patch);
   closeWizard();
   // Creds now exist — surface deals by kicking off a scan (the core action for a fresh install).
-  setViewMode('scan');
+  viewMode = 'scan';
   startScan();
 }
 
@@ -1269,38 +1259,27 @@ async function boot() {
     viewMode = 'scan';
     $('deals').innerHTML = '';
     $('empty').classList.remove('hidden');
-    $('empty').textContent = 'Welcome! Enter your Discogs username + token to start (⚙ Settings → Discogs account), then hit ⚡ Scan now.';
+    $('empty').textContent = 'Welcome! Enter your Discogs username + token to start (⚙ Settings → Discogs account), then hit ⚡ Full scan.';
     openWizard(true);
     refreshHealth();
     return;
   }
   let s = null; try { s = await window.api.getSettings(); } catch { s = {}; }
   setTelegramBadge(!!(s && s.telegramConnected));
-  const src = (s && s.sourceType) || 'scan';
-  // Restore the user's last VIEW, not just the configured source: someone in github mode who last
-  // looked at their scan results must get those same results back after a restart — the app
-  // silently switching views on relaunch is exactly the "jumped back in time" confusion.
-  const wantScanView = src === 'scan' || (s && s.lastView === 'scan');
-  if (wantScanView) {
-    viewMode = 'scan';
-    let last = null; try { last = await window.api.scrapeLast(); } catch { last = null; }
-    if (last && Array.isArray(last.deals)) {
-      scannedOnce = true;
-      allDeals = last.deals; allNearMisses = last.nearMisses || []; seenIds = new Set(allDeals.map((d) => d.id));
-      setStatus({ wantlistSize: last.wantlistTotal != null ? last.wantlistTotal : '—' });
-    } else if (src !== 'scan') {
-      // Scan view was chosen but there's no saved scan to show — fall back to the cloud feed.
-      viewMode = 'cloud';
-      refresh();
-      refreshHealth();
-      return;
-    } else {
-      allDeals = []; allNearMisses = [];
-    }
-    render();
+  // The deals tab ALWAYS shows the local scan: condition-verified VG+ copies with real shipping —
+  // the only view worth buying from. The cloud alert feed exists to drive the EMAILS (be-there-fast
+  // channel); it is deliberately not a dashboard view. Gems + the service badge/pills still ride
+  // the configured cloud source, so 💎 finds and watcher health stay visible.
+  viewMode = 'scan';
+  let last = null; try { last = await window.api.scrapeLast(); } catch { last = null; }
+  if (last && Array.isArray(last.deals)) {
+    scannedOnce = true;
+    allDeals = last.deals; allNearMisses = last.nearMisses || []; seenIds = new Set(allDeals.map((d) => d.id));
+    setStatus({ wantlistSize: last.wantlistTotal != null ? last.wantlistTotal : '—' });
   } else {
-    refresh();
+    allDeals = []; allNearMisses = [];
   }
+  render();
   refreshHealth();
 }
 
@@ -1308,11 +1287,8 @@ async function boot() {
 window.addEventListener('DOMContentLoaded', () => {
   $('tab-deals').addEventListener('click', () => setTab('deals'));
   $('tab-gems').addEventListener('click', () => setTab('gems'));
-  $('btn-scan').addEventListener('click', () => startScan());
-  $('btn-quickscan').addEventListener('click', () => startScan({ quick: true }));
   $('btn-fullscan').addEventListener('click', () => startScan({ fullMedians: true }));
   $('btn-scan-cancel').addEventListener('click', () => { if (hasApi) window.api.scrapeCancel(); $('scan-text').textContent = 'Stopping…'; });
-  $('btn-refresh').addEventListener('click', () => { setViewMode('cloud'); refresh(); refreshHealth(); });
   $('btn-settings').addEventListener('click', openSettings);
   $('svc-badge').addEventListener('click', () => { const u = $('svc-badge').dataset.url; if (u) openUrl(u); });
   $('pill-cron').addEventListener('click', () => { const u = $('pill-cron').dataset.url; if (u) openUrl(u); });
