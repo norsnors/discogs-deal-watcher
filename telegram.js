@@ -17,7 +17,7 @@
  * under the API's 4096-char limit on alert boundaries (never mid-block, so tags stay balanced).
  */
 
-const { fmtPrice, dealLine } = require('./mailer');
+const { fmtPrice, dealLine, recentSalesText } = require('./mailer');
 
 const TG_SAFE = 3900; // stay under Telegram's hard 4096-char/message API limit
 
@@ -39,7 +39,10 @@ function dealBlock(d) {
 
 function gemBlock(g) {
   const title = `${g.artist ? g.artist + ' – ' : ''}${g.title || 'release ' + g.releaseId}`;
-  const ref = g.reference != null ? ` · worth ~${esc(fmtPrice(g.reference, g.currency))}` : '';
+  // Real recent sales (last 10, <=2yr) beat a single blended reference for a rare record — same
+  // preference as mailer.js's renderGemsEmail, so both channels agree on what they claim.
+  const valueLine = recentSalesText(g) || (g.reference != null ? `worth ~${fmtPrice(g.reference, g.currency)}` : null);
+  const ref = valueLine ? ` · ${esc(valueLine)}` : '';
   return [
     `<b>${esc(title)}</b>`,
     `Had 0 copies for sale — ${g.numForSale === 1 ? 'the first one' : esc(String(g.numForSale)) + ' copies'} just appeared`,
@@ -133,6 +136,14 @@ if (require.main === module && process.argv.includes('--selftest')) {
   assert.ok(/Had 0 copies for sale — the first one just appeared/.test(gm), 'zero->first phrasing');
   assert.ok(/€85\.00.*asking — unfiltered/.test(gm), 'asking price unfiltered');
   assert.ok(/worth ~€120\.00/.test(gm), 'reference as context');
+
+  const [gmSales] = renderGemsMessages([{
+    releaseId: 3, artist: 'Vinicio', title: 'Dance You And Me', lowest: 79.99, currency: 'EUR', numForSale: 1,
+    reference: 45, referenceSource: 'sold-median', url: 'https://x',
+    recentSales: [{ date: '2026-05-24', price: 165 }, { date: '2025-07-27', price: 100 }],
+  }]);
+  assert.ok(/recent sales, last 2 in ~2yr: €165\.00 \(May '26\), €100\.00 \(Jul '25\)/.test(gmSales), 'recent sales list replaces the reference line');
+  assert.ok(!/worth ~/.test(gmSales), 'no "worth ~" line when recent sales are available');
 
   // Chunking: 40 deals must split into multiple messages, each under the limit, header on the first.
   const many = renderDealsMessages(Array.from({ length: 40 }, (_, i) => deal({ releaseId: i, title: `Release ${i} — a fairly long title to bulk the block up somewhat`, url: `https://www.discogs.com/sell/release/${i}?sort=price%2Casc` })));

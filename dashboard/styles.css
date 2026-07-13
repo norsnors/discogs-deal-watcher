@@ -265,6 +265,14 @@ input[type="range"] { accent-color: var(--accent); }
 .card .buy.gembuy { background: var(--gem-deep); }
 .card .buy.gembuy:hover { background: var(--gem); color: #1d0b33; }
 
+/* Recent-sales chips: replaces the single "worth ~X (median)" line when we have the real sale-by-sale
+   history (last 10, <=2yr) — a far better value signal for a rare/appreciating record. */
+.card .recent-sales { margin-top: 6px; }
+.card .recent-sales .label { font-size: 10.5px; color: var(--muted); margin-bottom: 3px; }
+.card .recent-sales .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.card .sale-chip { display: inline-block; padding: 2px 7px; border-radius: 9px; font-size: 11px; background: #2a2140; color: #d9c7ff; }
+.card .sale-chip .d { color: #9b7fd4; margin-left: 3px; }
+
 /* Section headers inside the 💎 tab (span the grid). */
 .deals .gems-head, .deals .zw-head {
   grid-column: 1 / -1;

@@ -21,6 +21,9 @@ contextBridge.exposeInMainWorld('api', {
   // Sold-medians git push: last persisted outcome (null = badge hidden) + a manual retry.
   getPushStatus: () => ipcRenderer.invoke('medians:pushStatus'),
   retryPush: () => ipcRenderer.invoke('medians:retryPush'),
+  // One-time Discogs login (unlocks the Sales History page for the 💎 rare-gem recent-sales list).
+  getDiscogsLoginStatus: () => ipcRenderer.invoke('discogs:loginStatus'),
+  loginDiscogs: () => ipcRenderer.invoke('discogs:login'),
   // ☁ Cloud setup: fork the watcher repo + configure the 24/7 email watcher on the user's own
   // GitHub account. Tokens are used transiently; progress streams via cloud:progress.
   cloudSetup: (opts) => ipcRenderer.invoke('cloud:setup', opts),

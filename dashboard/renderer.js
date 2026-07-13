@@ -29,7 +29,7 @@ const DEMO = [
 const DEMO_GEMS = {
   ts: Date.now(),
   gems: [
-    { id: 'dg1', releaseId: 1111, artist: 'Mr. Flagio', title: 'Take A Chance', lowest: 95, currency: 'EUR', numForSale: 1, reference: 120, referenceSource: 'sold-median', url: 'https://www.discogs.com/sell/release/1111?sort=price%2Casc', ts: Date.now() - 12 * 60000, thumb: '' },
+    { id: 'dg1', releaseId: 1111, artist: 'Mr. Flagio', title: 'Take A Chance', lowest: 95, currency: 'EUR', numForSale: 1, reference: 120, referenceSource: 'sold-median', recentSales: [{ date: '2026-05-24', price: 165, media: 'NM' }, { date: '2025-07-27', price: 100, media: 'VG' }, { date: '2024-12-31', price: 141.23, media: 'NM' }], url: 'https://www.discogs.com/sell/release/1111?sort=price%2Casc', ts: Date.now() - 12 * 60000, thumb: '' },
     { id: 'dg2', releaseId: 2222, artist: 'Squash Gang', title: 'I Want An Illusion', lowest: 40, currency: 'EUR', numForSale: 2, reference: null, referenceSource: null, url: 'https://www.discogs.com/sell/release/2222?sort=price%2Casc', ts: Date.now() - 3 * 3600000, thumb: '' },
   ],
   zeroWatch: [
@@ -72,6 +72,16 @@ const REF_LABEL = { 'sold-median': 'real sold median', suggestion: 'VG+ suggeste
 
 // "Very Good Plus (VG+)" -> "VG+"
 const gradeShort = (g) => { if (!g) return null; const m = String(g).match(/\(([^)]+)\)/); return m ? m[1] : g; };
+
+// "2026-05-24" -> "May '26" (mirrors mailer.js's fmtDateShort; duplicated because this file runs in
+// the renderer with no require(), same reason REF_LABEL is duplicated rather than shared).
+const SHORT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function fmtDateShort(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
+  if (!m) return '';
+  const mon = SHORT_MONTHS[parseInt(m[2], 10) - 1];
+  return mon ? `${mon} '${m[1].slice(-2)}` : '';
+}
 const GOOD_GRADES = new Set(['M', 'NM or M-', 'NM', 'M-', 'VG+']); // VG+ or better
 const VGPLUS_RANK = 2; // Discogs grade ladder: M=0, NM=1, VG+=2, VG=3, G+=4, G=5, F=6, P=7
 
@@ -378,8 +388,16 @@ function gemCard(g) {
     ? `<img class="thumb" src="${esc(g.thumb)}" alt="" referrerpolicy="no-referrer" />`
     : `<div class="thumb"></div>`;
   const appeared = g.numForSale === 1 ? 'first copy appeared' : `${esc(String(g.numForSale))} copies appeared`;
-  const ref = g.reference != null
-    ? `<div class="ref">worth ~${money(g.reference, g.currency)} (${REF_LABEL[g.referenceSource] || 'reference'})</div>` : '';
+  // Real recent sales (last 10, <=2yr — from the local scan's Sales History login) beat a single
+  // blended median for a rare/appreciating record, so they replace the "worth ~X" line when present.
+  const recentSales = Array.isArray(g.recentSales) && g.recentSales.length
+    ? `<div class="recent-sales">
+        <div class="label">Recent sales (last ${g.recentSales.length}, &le;2 yrs)</div>
+        <div class="chips">${g.recentSales.map((s) => `<span class="sale-chip">${money(s.price, g.currency)}${s.date ? `<span class="d">${esc(fmtDateShort(s.date))}</span>` : ''}</span>`).join('')}</div>
+      </div>`
+    : '';
+  const ref = recentSales || (g.reference != null
+    ? `<div class="ref">worth ~${money(g.reference, g.currency)} (${REF_LABEL[g.referenceSource] || 'reference'})</div>` : '');
   // Live verification (same pipeline as the deals): still for sale, and in what condition?
   const live = g.gone
     ? `<span class="tag gone" title="The live marketplace check no longer finds any copy for sale">⌛ no longer listed</span>`
@@ -953,8 +971,31 @@ async function openSettings() {
   $('set-test').textContent = '';
   $('set-test').className = 'test-result';
   $('settings-modal').classList.remove('hidden');
+  refreshDiscogsLoginStatus();
 }
 function closeSettings() { $('settings-modal').classList.add('hidden'); }
+
+// 💎 Recent-sales-for-gems login status: reflects whether the Sales History page is unlocked.
+async function refreshDiscogsLoginStatus() {
+  const el = $('set-discogs-login-status');
+  if (!el) return;
+  if (!hasApi) { el.textContent = ''; return; }
+  const loggedIn = await window.api.getDiscogsLoginStatus().catch(() => false);
+  el.textContent = loggedIn
+    ? '✓ Logged in — rare gems show recent sales history.'
+    : 'Not logged in yet — rare gems show only the estimated median.';
+}
+async function loginToDiscogs() {
+  const btn = $('set-discogs-login-btn');
+  btn.disabled = true;
+  const el = $('set-discogs-login-status');
+  if (el) el.textContent = 'Waiting for you to log in in the window that just opened…';
+  try {
+    const res = await window.api.loginDiscogs();
+    if (res && res.started === false) { if (el) el.textContent = 'A login window is already open.'; return; }
+  } finally { btn.disabled = false; }
+  refreshDiscogsLoginStatus();
+}
 
 function collectSettings() {
   return {
@@ -1294,6 +1335,7 @@ window.addEventListener('DOMContentLoaded', () => {
   $('pill-cron').addEventListener('click', () => { const u = $('pill-cron').dataset.url; if (u) openUrl(u); });
   $('push-badge').addEventListener('click', retryPushClick);
   $('set-cancel').addEventListener('click', closeSettings);
+  $('set-discogs-login-btn').addEventListener('click', loginToDiscogs);
   $('set-save').addEventListener('click', saveSettings);
   $('set-test-btn').addEventListener('click', testConnection);
   $('set-sourceType').addEventListener('change', toggleSrc);

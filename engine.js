@@ -423,6 +423,29 @@ function isRareAppearance(prevObs, curObs) {
 }
 
 /*
+ * recentSales(rows, opts) — trims the raw scraped sales-history table (newest-first, ISO dates) down
+ * to what the rare-gem display wants: the last `limit` sales (default 10) that happened within
+ * `years` (default 2). A rare/appreciating record's sale-by-sale history is a far better value signal
+ * than a single median (which blends in decade-old sales at old prices) — this is display data only,
+ * it doesn't feed the deal-threshold engine. `now` is injectable for tests; rows with an unparseable
+ * date are dropped (can't judge their age). Input rows: [{ date: 'YYYY-MM-DD', price, media? }].
+ */
+function recentSales(rows, opts = {}) {
+  const { years = 2, limit = 10, now = Date.now() } = opts;
+  if (!Array.isArray(rows)) return [];
+  const cutoff = now - years * 365 * 24 * 60 * 60 * 1000;
+  const out = [];
+  for (const r of rows) {
+    if (!r || typeof r.price !== 'number' || !isFinite(r.price)) continue;
+    const t = r.date ? Date.parse(r.date) : NaN;
+    if (!isFinite(t) || t < cutoff) continue;
+    out.push({ date: r.date, price: r.price, media: r.media || null });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/*
  * releaseWatchScore(history, now, opts) — how urgently a release deserves re-checking.
  * Higher = check sooner. Lets the rotating sweep spend its limited per-run API budget on
  * the releases most likely to surface a just-listed bargain, instead of pure round-robin.
@@ -482,6 +505,7 @@ module.exports = {
   shouldFire,
   isFreshListing,
   isRareAppearance,
+  recentSales,
   releaseWatchScore,
   extractLadder,
   impliedGrade,
@@ -761,6 +785,25 @@ if (require.main === module && process.argv.includes('--selftest')) {
   assert.ok(!isRareAppearance({ numForSale: 0 }, { numForSale: 0 }), 'still zero -> nothing appeared');
   assert.ok(!isRareAppearance({ numForSale: null }, { numForSale: 2 }), 'unknown previous count can\'t claim "was unavailable"');
   assert.ok(!isRareAppearance(null, { numForSale: 2 }), 'no previous observation -> not a rare appearance');
+
+  // --- recentSales (rare-gem display: last N sales within the last `years`) ---
+  const rsNow = Date.parse('2026-07-13');
+  const rsRows = [
+    { date: '2026-05-24', price: 165, media: 'NM' },
+    { date: '2025-07-27', price: 100, media: 'VG' },
+    { date: '2024-12-31', price: 141.23, media: 'NM' },
+    { date: '2023-03-24', price: 35 }, // > 2yr before rsNow -> excluded
+    { date: 'bogus', price: 999 }, // unparseable date -> excluded
+    { date: '2024-01-01', price: null }, // no price -> excluded
+  ];
+  const rs = recentSales(rsRows, { now: rsNow });
+  assert.strictEqual(rs.length, 3, 'drops sales older than 2 years, unparseable dates, and priceless rows');
+  assert.strictEqual(rs[0].price, 165, 'newest-first order preserved (input order, not re-sorted)');
+  assert.strictEqual(rs[1].media, 'VG', 'media condition carried through when present');
+  assert.strictEqual(recentSales(rsRows, { now: rsNow, years: 1 }).length, 2, 'a tighter years window excludes more');
+  assert.strictEqual(recentSales(rsRows, { now: rsNow, limit: 2 }).length, 2, 'limit caps the count');
+  assert.deepStrictEqual(recentSales(null), [], 'non-array input returns empty, not a throw');
+  assert.deepStrictEqual(recentSales([]), [], 'empty input returns empty');
 
   // --- releaseWatchScore ---
   const t = 10_000_000;

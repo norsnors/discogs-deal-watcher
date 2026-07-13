@@ -15,7 +15,7 @@
  * and there are no CORS concerns. The renderer talks to us over IPC (see preload.js).
  */
 
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
@@ -315,6 +315,8 @@ const parseMoney = (s) => { if (s == null) return null; const n = parseFloat(Str
 
 // In-page extractor: pull the "Last Sold / Low / Median / High" sales-history block off the
 // release page. Discogs renders it in plain text once Cloudflare clears (verified live).
+// FALLBACK ONLY (see SALES_HISTORY_EXTRACT below, the preferred source) — kept so median/low/high
+// still work anonymously for anyone who hasn't done the one-time Discogs login.
 const SOLD_EXTRACT = `(() => {
   const t = document.body ? document.body.innerText : '';
   const g = (re) => { const m = t.match(re); return m ? m[1] : null; };
@@ -323,6 +325,49 @@ const SOLD_EXTRACT = `(() => {
     low: g(/Low:\\s*[^\\d-]{0,4}([\\d.,]+)/i),
     high: g(/High:\\s*[^\\d-]{0,4}([\\d.,]+)/i),
     lastSold: g(/Last Sold:\\s*([^\\n\\t]+)/i),
+    challenged: /just a moment|checking your browser|enable javascript/i.test((document.title || '') + ' ' + t.slice(0, 300)),
+    len: t.length,
+  };
+})()`;
+
+const SALES_HISTORY_URL = (releaseId) => `https://www.discogs.com/sell/history/${Number(releaseId)}`;
+
+// Sales History page (/sell/history/{id}): the SAME aggregate Median/Low/High/Last-Sold stats AND
+// the full per-sale table (date, condition, price) in one navigation — strictly better than the old
+// release-page scrape above, because it also gives the sale-by-sale list the rare-gem display wants
+// (a much better value signal for a rare/appreciating record than one blended median). BUT it
+// requires being logged in to Discogs — an anonymous request redirects to login.discogs.com
+// (verified live 2026-07-13). The hidden cfWin uses Electron's default (persistent, no explicit
+// partition) session — the SAME session the one-time "Log in to Discogs" window uses (see
+// startDiscogsLogin) — so once the user logs in once, this works from then on with no further
+// action; until then loadReleaseData falls back to SOLD_EXTRACT (median only, no login needed).
+// Table markup verified live: `tr.sales-history-row` per sale, with `td[data-header="Order Date:"]`
+// (ISO yyyy-mm-dd), `td[data-header="Media:"]`, and `td.price` — the price in the ACCOUNT's
+// currency, NOT `td.converted_price` (the seller's native listing currency, which varies row to
+// row, e.g. CHF/USD) — using the account-currency column keeps every sale directly comparable
+// without doing our own FX conversion. If Discogs changes this markup, the symptom is every gem
+// falling back to the old median-only display; recheck the selectors here.
+const SALES_HISTORY_EXTRACT = `(() => {
+  const t = document.body ? document.body.innerText : '';
+  const g = (re) => { const m = t.match(re); return m ? m[1] : null; };
+  const rows = [...document.querySelectorAll('tr.sales-history-row')];
+  const sales = rows.map((tr) => {
+    const dateEl = tr.querySelector('td[data-header="Order Date:"]');
+    const mediaEl = tr.querySelector('td[data-header="Media:"]');
+    const priceEl = tr.querySelector('td.price');
+    return {
+      date: dateEl ? dateEl.textContent.trim() : null,
+      media: mediaEl ? mediaEl.textContent.trim() : null,
+      priceText: priceEl ? priceEl.textContent.trim() : null,
+    };
+  }).filter((s) => s.date && s.priceText);
+  return {
+    median: g(/([\\d.,]+)\\s*Median\\b/i),
+    low: g(/([\\d.,]+)\\s*Low\\b/i),
+    high: g(/([\\d.,]+)\\s*High\\b/i),
+    lastSold: g(/Last sold on\\s*([^\\n\\t]+)/i),
+    sales,
+    loginRequired: /login\\.discogs\\.com/.test(location.href),
     challenged: /just a moment|checking your browser|enable javascript/i.test((document.title || '') + ' ' + t.slice(0, 300)),
     len: t.length,
   };
@@ -469,11 +514,25 @@ async function loadReleaseData(cfWin, releaseId, currency, opts = {}) {
   let cleared = false;
 
   if (needSold) {
-    await cfWin.loadURL(`https://www.discogs.com/release/${releaseId}`, { userAgent: DISCOGS_UA }).catch(() => {});
-    const r = await waitFor(cfWin, SOLD_EXTRACT, (x) => x && !x.challenged && x.len > 1500);
-    if (r) {
+    await cfWin.loadURL(SALES_HISTORY_URL(releaseId), { userAgent: DISCOGS_UA }).catch(() => {});
+    const r = await waitFor(cfWin, SALES_HISTORY_EXTRACT, (x) => x && (x.loginRequired || (!x.challenged && x.len > 800)));
+    if (r && !r.loginRequired && !r.challenged) {
       cleared = true;
-      sold = { median: parseMoney(r.median), low: parseMoney(r.low), high: parseMoney(r.high), lastSold: r.lastSold || null, ts: Date.now() };
+      sold = {
+        median: parseMoney(r.median), low: parseMoney(r.low), high: parseMoney(r.high), lastSold: r.lastSold || null,
+        sales: (r.sales || []).map((s) => ({ date: s.date, media: s.media, price: parseMoney(s.priceText) })).filter((s) => s.price != null),
+        ts: Date.now(),
+      };
+    } else {
+      // Not logged in (or the sales-history page didn't clear) -> fall back to the anonymous
+      // release-page aggregate-only scrape. No per-sale list this way, but median/low/high still
+      // work exactly as they did before the sales-history page was added.
+      await cfWin.loadURL(`https://www.discogs.com/release/${releaseId}`, { userAgent: DISCOGS_UA }).catch(() => {});
+      const r2 = await waitFor(cfWin, SOLD_EXTRACT, (x) => x && !x.challenged && x.len > 1500);
+      if (r2) {
+        cleared = true;
+        sold = { median: parseMoney(r2.median), low: parseMoney(r2.low), high: parseMoney(r2.high), lastSold: r2.lastSold || null, sales: [], ts: Date.now() };
+      }
     }
   }
 
@@ -524,6 +583,42 @@ async function loadReleaseData(cfWin, releaseId, currency, opts = {}) {
     totalCount: lr ? lr.totalCount : null,
     shippingJoined,
   };
+}
+
+// One-time Discogs login — unlocks the Sales History page (SALES_HISTORY_EXTRACT above) so the
+// 💎 rare-gem display can show real recent sales instead of just the aggregate median. The hidden
+// cfWin used everywhere else in this file opens with no explicit `partition`, which means it's
+// Electron's DEFAULT session — persistent to disk under userData, same as this login window. So a
+// one-time visible login here leaves the cookie in place for every future hidden cfWin, with no
+// partition wiring needed. The USER logs in themselves in their own real window (credentials, 2FA,
+// all theirs) — this code never sees a password, only whether a known logged-in cookie shows up.
+let discogsLoginWin = null;
+async function isDiscogsLoggedIn() {
+  try {
+    const cookies = await session.defaultSession.cookies.get({ url: 'https://www.discogs.com', name: 'ck_username' });
+    return cookies.length > 0;
+  } catch { return false; }
+}
+function startDiscogsLogin() {
+  return new Promise((resolve) => {
+    if (discogsLoginWin) { try { discogsLoginWin.focus(); } catch { /* already gone */ } resolve({ started: false }); return; }
+    discogsLoginWin = new BrowserWindow({ width: 480, height: 720, title: 'Log in to Discogs', webPreferences: { images: true } });
+    discogsLoginWin.loadURL('https://www.discogs.com/login', { userAgent: DISCOGS_UA }).catch(() => {});
+    let settled = false;
+    const finish = async (closedByUser) => {
+      if (settled) return;
+      clearInterval(poll);
+      const loggedIn = await isDiscogsLoggedIn();
+      settled = true;
+      try { if (!closedByUser && discogsLoginWin && !discogsLoginWin.isDestroyed()) discogsLoginWin.close(); } catch { /* already closing */ }
+      discogsLoginWin = null;
+      resolve({ started: true, loggedIn });
+    };
+    const poll = setInterval(async () => {
+      if (await isDiscogsLoggedIn()) finish(false);
+    }, 2000);
+    discogsLoginWin.on('closed', () => finish(true));
+  });
 }
 
 async function runScrape(win, opts = {}) {
@@ -610,8 +705,13 @@ async function runScrape(win, opts = {}) {
       // If the page cleared but the release has simply never sold, cache a null-median sentinel so the
       // warm-up below doesn't keep re-scraping it every run (only when we don't already have a real one).
       let sold = cachedSold;
-      if (data.sold && data.sold.median != null) { sold = data.sold; store.setSoldMedian(c.rel.releaseId, data.sold); }
-      else if (data.cleared && data.sold && (!cachedSold || cachedSold.median == null)) { store.setSoldMedian(c.rel.releaseId, { median: null, low: null, high: null, lastSold: data.sold.lastSold || 'Never', ts: Date.now() }); }
+      if (data.sold && data.sold.median != null) {
+        // Trim the raw scraped sales list down to what the rare-gem display wants (last 10 within
+        // 2 years) before persisting — keeps the store small and every reader gets the same window.
+        sold = { ...data.sold, sales: engine.recentSales(data.sold.sales, { years: 2, limit: 10 }) };
+        store.setSoldMedian(c.rel.releaseId, sold);
+      }
+      else if (data.cleared && data.sold && (!cachedSold || cachedSold.median == null)) { store.setSoldMedian(c.rel.releaseId, { median: null, low: null, high: null, lastSold: data.sold.lastSold || 'Never', sales: [], ts: Date.now() }); }
       if (data.sold) scrapedThisRun.add(c.rel.releaseId); // got a release-page read this run -> warm-up needn't redo it
 
       const common = {
@@ -750,8 +850,11 @@ async function runScrape(win, opts = {}) {
         let d = { cleared: false, sold: null };
         try { d = await loadReleaseData(cfWin, rel.releaseId, config.currency, { soldOnly: true }); } catch { /* transient — retry next scan */ }
         if (d.sold) scrapedThisRun.add(rel.releaseId); // a later candidate for this release needn't re-scrape
-        if (d.sold && d.sold.median != null) { store.setSoldMedian(rel.releaseId, d.sold); warmedReal++; }
-        else if (d.cleared && d.sold) { store.setSoldMedian(rel.releaseId, { median: null, low: null, high: null, lastSold: d.sold.lastSold || 'Never', ts: Date.now() }); }
+        if (d.sold && d.sold.median != null) {
+          store.setSoldMedian(rel.releaseId, { ...d.sold, sales: engine.recentSales(d.sold.sales, { years: 2, limit: 10 }) });
+          warmedReal++;
+        }
+        else if (d.cleared && d.sold) { store.setSoldMedian(rel.releaseId, { median: null, low: null, high: null, lastSold: d.sold.lastSold || 'Never', sales: [], ts: Date.now() }); }
         warmedChecked++;
         await sleep(300);
         return true;
@@ -816,6 +919,7 @@ async function runScrape(win, opts = {}) {
               numForSale: stats.numForSale,
               reference: refSource === 'sold-median' ? sm.median : (refSource === 'suggestion' ? sug0.vgplus : null),
               referenceSource: refSource,
+              recentSales: sm && Array.isArray(sm.sales) && sm.sales.length ? sm.sales : null,
               url: marketUrl(rel.releaseId),
               releaseUrl: engine.releaseUrl(rel.releaseId),
               ts: Date.now(),
@@ -1075,6 +1179,8 @@ ipcMain.handle('scrape:run', (e, opts) => runScrape(BrowserWindow.fromWebContent
 ipcMain.handle('verify:run', (e, items) => runVerify(BrowserWindow.fromWebContents(e.sender), items || []));
 ipcMain.handle('scrape:cancel', () => { scrapeAbort = true; return true; });
 ipcMain.handle('scrape:last', () => lastScan());
+ipcMain.handle('discogs:loginStatus', () => isDiscogsLoggedIn());
+ipcMain.handle('discogs:login', () => startDiscogsLogin());
 // Medians push status — null hides the badge (packaged installs never push: there's no repo; and
 // with autoPushMedians off there's nothing to report). Retry lets the user fix a red badge in place.
 ipcMain.handle('medians:pushStatus', () => {

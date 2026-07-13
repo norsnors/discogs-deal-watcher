@@ -22,6 +22,32 @@ const REF_LABEL = {
   'trailing-median': 'its usual lowest price',
 };
 
+// "2026-05-24" -> "May '26". No date library (mirrors the rest of the codebase's dependency-free
+// style) and locale-independent (unlike Date#toLocaleString, which needs ICU data present).
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function fmtDateShort(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
+  if (!m) return '';
+  const mon = MONTHS[parseInt(m[2], 10) - 1];
+  return mon ? `${mon} '${m[1].slice(-2)}` : '';
+}
+
+// A rare/appreciating record's actual recent sales (last 10, <=2yr — scraped locally from Discogs'
+// Sales History page) are a far better value signal than one blended median (which mixes in
+// decade-old sales at old prices). Used only for the 💎 gem display — the deal-threshold engine is
+// untouched. null/empty when the release was never scraped (or scraped before the sales-history
+// login was set up) -> callers fall back to refLine().
+function recentSalesText(g) {
+  if (!Array.isArray(g.recentSales) || !g.recentSales.length) return null;
+  const items = g.recentSales.map((s) => `${fmtPrice(s.price, g.currency)}${s.date ? ` (${fmtDateShort(s.date)})` : ''}`);
+  return `recent sales, last ${items.length} in ~2yr: ${items.join(', ')}`;
+}
+function recentSalesHtml(g) {
+  if (!Array.isArray(g.recentSales) || !g.recentSales.length) return '';
+  const chips = g.recentSales.map((s) => `<span style="display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;background:#f3f0ff;border-radius:10px;font-size:12px;color:#5b21b6">${esc(fmtPrice(s.price, g.currency))}${s.date ? `<span style="color:#9333ea"> · ${esc(fmtDateShort(s.date))}</span>` : ''}</span>`).join('');
+  return `<div style="margin-top:6px"><div style="font-size:11px;color:#888;margin-bottom:3px">Recent sales (last ${g.recentSales.length}, &le;2 yrs)</div><div>${chips}</div></div>`;
+}
+
 function dealLine(d) {
   const ref = `${fmtPrice(d.reference, d.currency)} (${REF_LABEL[d.referenceSource] || 'reference'})`;
   const flags = [];
@@ -107,10 +133,13 @@ function renderGemsEmail(gems) {
   const refLine = (g) => (g.reference != null
     ? `worth ~${fmtPrice(g.reference, g.currency)} (${REF_LABEL[g.referenceSource] || 'reference'})`
     : null);
+  // Prefer the real recent-sales list when we have it (better value signal for a rare record);
+  // fall back to the single blended reference when the release hasn't been scraped yet.
+  const valueLine = (g) => recentSalesText(g) || refLine(g);
 
   const textRows = gems.map((g) => [
     `• ${title(g)}`,
-    `  Had NO copies for sale — ${g.numForSale === 1 ? 'one just appeared' : g.numForSale + ' just appeared'} at ${fmtPrice(g.lowest, g.currency)}${refLine(g) ? `  ·  ${refLine(g)}` : ''}`,
+    `  Had NO copies for sale — ${g.numForSale === 1 ? 'one just appeared' : g.numForSale + ' just appeared'} at ${fmtPrice(g.lowest, g.currency)}${valueLine(g) ? `  ·  ${valueLine(g)}` : ''}`,
     `  Buy: ${g.url}`,
   ].join('\n'));
   const text = `${n} rare record${n > 1 ? 's' : ''} from your wantlist just became available (previously ZERO for sale):\n\n${textRows.join('\n\n')}\n\nRare copies sell fast — check them now. Condition/price are unfiltered by design.\n`;
@@ -118,7 +147,7 @@ function renderGemsEmail(gems) {
   const cards = gems.map((g) => {
     const thumb = g.thumb
       ? `<img src="${esc(g.thumb)}" alt="" width="64" height="64" style="border-radius:6px;object-fit:cover;margin-right:12px">` : '';
-    const ref = refLine(g) ? `<div style="font-size:12px;color:#666">${esc(refLine(g))}</div>` : '';
+    const ref = recentSalesHtml(g) || (refLine(g) ? `<div style="font-size:12px;color:#666">${esc(refLine(g))}</div>` : '');
     return `
       <tr><td style="padding:14px 0;border-bottom:1px solid #eee">
         <table role="presentation" width="100%"><tr>
@@ -231,8 +260,9 @@ function makeMailer(cfg = {}) {
   return disabledMailer(null, 'set email.provider + credentials');
 }
 
-// dealLine is shared with telegram.js so both channels render identical flags/labels for a deal.
-module.exports = { makeMailer, renderDealsEmail, renderGemsEmail, buildResendPayload, fmtPrice, dealLine };
+// dealLine/recentSalesText are shared with telegram.js so both channels render identical
+// flags/labels/value-lines for a deal or gem.
+module.exports = { makeMailer, renderDealsEmail, renderGemsEmail, buildResendPayload, fmtPrice, dealLine, recentSalesText, fmtDateShort };
 
 // --- tiny self-test (node mailer.js --selftest) ----------------------------
 if (require.main === module && process.argv.includes('--selftest')) {
@@ -266,6 +296,21 @@ if (require.main === module && process.argv.includes('--selftest')) {
   ]);
   assert.ok(/💎 2 rare wantlist records/.test(gm2.subject), 'multi-gem subject counts');
   assert.ok(/2 just appeared/.test(gm2.text), 'multi-copy appearance phrased with the count');
+
+  // --- rare-gem email: recent sales list replaces the single reference line when we have it ---
+  assert.strictEqual(fmtDateShort('2026-05-24'), "May '26", 'date shortened to "Mon \'YY"');
+  assert.strictEqual(fmtDateShort(''), '', 'unparseable date -> empty string, not a throw');
+  const gm3 = renderGemsEmail([
+    {
+      releaseId: 3, artist: 'Vinicio', title: 'Dance You And Me', lowest: 79.99, currency: 'EUR', numForSale: 1,
+      reference: 45, referenceSource: 'sold-median', url: 'https://x',
+      recentSales: [{ date: '2026-05-24', price: 165, media: 'NM' }, { date: '2025-07-27', price: 100, media: 'VG' }],
+    },
+  ]);
+  assert.ok(/recent sales, last 2 in ~2yr: €165\.00 \(May '26\), €100\.00 \(Jul '25\)/.test(gm3.text), 'recent sales list replaces the "worth ~X" line');
+  assert.ok(!/worth ~/.test(gm3.text), 'the single-reference line is dropped when recent sales are available');
+  assert.ok(/Recent sales \(last 2, &le;2 yrs\)/.test(gm3.html), 'html shows the recent-sales heading');
+  assert.ok(/€165\.00/.test(gm3.html) && /€100\.00/.test(gm3.html), 'both recent sale prices rendered in html');
 
   // A deal judged against the REAL sold price is high-trust: no "estimate, confirm" caveat.
   const trusted = renderDealsEmail([{ releaseId: 9, artist: 'A', title: 'B', lowest: 10, currency: 'EUR', reference: 40, referenceSource: 'sold-median', discount: 0.75, numForSale: 2, url: 'https://x' }]);

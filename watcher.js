@@ -163,6 +163,10 @@ async function processRelease(rel, deps) {
         numForSale: stats.numForSale,
         reference: refSource === 'sold-median' ? sold.median : (refSource === 'suggestion' ? sug.vgplus : null),
         referenceSource: refSource,
+        // Real recent sales (last 10, <=2yr — scraped locally, see dashboard/main.js) beat a single
+        // blended median for a rare/appreciating record; committed to soldmedians.json so the cloud
+        // has it too. null when never scraped (or scraped before the sales-history login was set up).
+        recentSales: sold && Array.isArray(sold.sales) && sold.sales.length ? sold.sales : null,
         url: `${engine.releaseMarketUrl(rel.releaseId)}?sort=price%2Casc&limit=25&currency=${config.currency}`,
         releaseUrl: engine.releaseUrl(rel.releaseId),
         ts: Date.now(),
