@@ -44,6 +44,20 @@ let allNearMisses = [];   // releases that looked cheap but didn't qualify (scan
 let seenIds = new Set();
 let firstLoad = true;
 let viewMode = 'cloud';   // 'cloud' | 'scan'
+
+// The user's view CHOICE (manual scan -> 'scan', ↻ refresh -> 'cloud') is persisted as
+// settings.lastView and restored by boot(), so a restart brings back exactly what was on screen —
+// closing and reopening the app must never silently switch what the deals tab shows.
+function setViewMode(mode) {
+  viewMode = mode;
+  if (!hasApi) return;
+  (async () => {
+    try {
+      const cur = await window.api.getSettings();
+      if (cur.lastView !== mode) await window.api.saveSettings({ ...cur, lastView: mode });
+    } catch { /* persistence is best-effort; the session keeps working either way */ }
+  })();
+}
 let activeTab = 'deals';  // 'deals' | 'gems' — the 💎 Rare tab shows rare appearances + the zero-stock watch list
 let gemsData = { ts: null, gems: [], zeroWatch: [] };
 let seenGemIds = new Set();
@@ -830,10 +844,20 @@ async function startScan(opts = {}) {
     // launch never silently "jumps back" to a smaller local-scan snapshot. A MANUAL scan, or an
     // auto-scan when the user's source already IS local, switches to the scan results as before.
     if (opts.background) {
+      // If the scan view is what's on screen (restored by boot after a restart), a background scan
+      // just produced FRESHER results for that very view — show them instead of the stale snapshot.
+      if (viewMode === 'scan') {
+        scannedOnce = true;
+        allDeals = (res && res.deals) || [];
+        allNearMisses = (res && res.nearMisses) || [];
+        seenIds = new Set(allDeals.map((d) => d.id));
+        setStatus({ wantlistSize: res ? (res.wantlistTotal ?? res.total) : '—' });
+        render();
+      }
       refreshGems();
-      refresh(); // re-pull + re-verify the cloud feed (medians it just refreshed feed the next sweep)
+      refresh(); // no-op in scan view; otherwise re-pull + re-verify the cloud feed
     } else {
-      viewMode = 'scan';
+      setViewMode('scan');
       scannedOnce = true;
       allDeals = (res && res.deals) || [];
       allNearMisses = (res && res.nearMisses) || [];
@@ -1038,7 +1062,7 @@ async function wizardSave() {
   await window.api.saveConfig(patch);
   closeWizard();
   // Creds now exist — surface deals by kicking off a scan (the core action for a fresh install).
-  viewMode = 'scan';
+  setViewMode('scan');
   startScan();
 }
 
@@ -1253,13 +1277,23 @@ async function boot() {
   let s = null; try { s = await window.api.getSettings(); } catch { s = {}; }
   setTelegramBadge(!!(s && s.telegramConnected));
   const src = (s && s.sourceType) || 'scan';
-  if (src === 'scan') {
+  // Restore the user's last VIEW, not just the configured source: someone in github mode who last
+  // looked at their scan results must get those same results back after a restart — the app
+  // silently switching views on relaunch is exactly the "jumped back in time" confusion.
+  const wantScanView = src === 'scan' || (s && s.lastView === 'scan');
+  if (wantScanView) {
     viewMode = 'scan';
     let last = null; try { last = await window.api.scrapeLast(); } catch { last = null; }
     if (last && Array.isArray(last.deals)) {
       scannedOnce = true;
       allDeals = last.deals; allNearMisses = last.nearMisses || []; seenIds = new Set(allDeals.map((d) => d.id));
       setStatus({ wantlistSize: last.wantlistTotal != null ? last.wantlistTotal : '—' });
+    } else if (src !== 'scan') {
+      // Scan view was chosen but there's no saved scan to show — fall back to the cloud feed.
+      viewMode = 'cloud';
+      refresh();
+      refreshHealth();
+      return;
     } else {
       allDeals = []; allNearMisses = [];
     }
@@ -1278,7 +1312,7 @@ window.addEventListener('DOMContentLoaded', () => {
   $('btn-quickscan').addEventListener('click', () => startScan({ quick: true }));
   $('btn-fullscan').addEventListener('click', () => startScan({ fullMedians: true }));
   $('btn-scan-cancel').addEventListener('click', () => { if (hasApi) window.api.scrapeCancel(); $('scan-text').textContent = 'Stopping…'; });
-  $('btn-refresh').addEventListener('click', () => { viewMode = 'cloud'; refresh(); refreshHealth(); });
+  $('btn-refresh').addEventListener('click', () => { setViewMode('cloud'); refresh(); refreshHealth(); });
   $('btn-settings').addEventListener('click', openSettings);
   $('svc-badge').addEventListener('click', () => { const u = $('svc-badge').dataset.url; if (u) openUrl(u); });
   $('pill-cron').addEventListener('click', () => { const u = $('pill-cron').dataset.url; if (u) openUrl(u); });
